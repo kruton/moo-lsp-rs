@@ -1,0 +1,25 @@
+# Cargo generated
+/debug
+/target
+
+# rustfmt
+**/*.rs.bk
+
+# Windows MSVC
+*.pdb
+
+# cargo mutants
+**/mutants.out*/
+
+# rustc internal compiler error
+rustc-ice-*.txt
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
