@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 
+pub mod formatting;
 pub mod line_index;
 pub mod parser;
 pub mod semantic_tokens;
@@ -36,6 +37,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -107,6 +109,35 @@ impl LanguageServer for Backend {
             })
         }))
     }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let documents = self.documents.read().unwrap();
+        let Some(text) = documents.get(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let Some(new_text) = formatting::format(text) else {
+            return Ok(None);
+        };
+        if new_text == *text {
+            return Ok(Some(Vec::new()));
+        }
+
+        let end = document_end(text);
+        Ok(Some(vec![TextEdit {
+            range: Range {
+                start: Position::new(0, 0),
+                end,
+            },
+            new_text,
+        }]))
+    }
+}
+
+fn document_end(text: &str) -> Position {
+    let line = text.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let last_line = text.rsplit('\n').next().unwrap_or_default();
+    let character = last_line.encode_utf16().count() as u32;
+    Position::new(line, character)
 }
 
 impl Backend {
