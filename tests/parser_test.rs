@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-
 use moo_lsp_rs::line_index::LineIndex;
 use moo_lsp_rs::parser;
 
@@ -47,7 +46,6 @@ fn test_all_features() {
         ";",
         "try a = 1; except (E_NONE) b = 2; endtry;",
         "try a = 1; finally b = 2; endtry;",
-        
         // Expressions
         "1;",
         "1.0;",

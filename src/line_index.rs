@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-
 pub struct LineIndex {
     line_starts: Vec<usize>,
     len: usize,

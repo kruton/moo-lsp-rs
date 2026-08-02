@@ -211,8 +211,10 @@ mod tests {
         let tokens = collect("types = {int, Num, OBJ, str, Err, LIST, float, Map, BOOL, waif};");
         assert_eq!(tokens[0].token_type, VARIABLE);
         assert_eq!(tokens[1].token_type, OPERATOR);
-        assert!(tokens[2..]
-            .iter()
-            .all(|token| token.token_type == ENUM_MEMBER));
+        assert!(
+            tokens[2..]
+                .iter()
+                .all(|token| token.token_type == ENUM_MEMBER)
+        );
     }
 }
