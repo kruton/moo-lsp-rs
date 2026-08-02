@@ -71,7 +71,7 @@ jobs:
       id-token: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust target
         shell: bash
@@ -105,12 +105,12 @@ jobs:
         run: Compress-Archive -Path "dist/${{ matrix.vscode_target }}" -DestinationPath "${{ matrix.archive }}"
 
       - name: Attest release archive
-        uses: actions/attest@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ matrix.archive }}
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.vscode_target }}
           path: ${{ matrix.archive }}
@@ -128,10 +128,10 @@ jobs:
       id-token: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all platform archives
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: release-assets
           pattern: "*-*"
@@ -142,7 +142,7 @@ jobs:
         run: sha256sum moo-lsp-rs-* > SHA256SUMS
 
       - name: Attest checksums
-        uses: actions/attest@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: release-assets/SHA256SUMS
 
