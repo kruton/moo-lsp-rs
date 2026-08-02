@@ -110,7 +110,7 @@ jobs:
           subject-path: ${{ matrix.archive }}
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.vscode_target }}
           path: ${{ matrix.archive }}
@@ -128,7 +128,7 @@ jobs:
       id-token: write
     steps:
       - name: Download all platform archives
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           pattern: "*-*"
