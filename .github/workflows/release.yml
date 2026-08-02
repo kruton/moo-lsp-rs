@@ -71,7 +71,7 @@ jobs:
       id-token: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust target
         shell: bash
