@@ -105,7 +105,7 @@ jobs:
         run: Compress-Archive -Path "dist/${{ matrix.vscode_target }}" -DestinationPath "${{ matrix.archive }}"
 
       - name: Attest release archive
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ matrix.archive }}
 
@@ -142,7 +142,7 @@ jobs:
         run: sha256sum moo-lsp-rs-* > SHA256SUMS
 
       - name: Attest checksums
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/SHA256SUMS
 
