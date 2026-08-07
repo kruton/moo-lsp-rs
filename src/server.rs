@@ -23,10 +23,10 @@ use moo_lsp_rs::{formatting, line_index::LineIndex, parser, semantic_tokens};
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-pub fn run(connection: &Connection) -> ServerResult<()> {
+pub fn run(connection: Connection) -> ServerResult<()> {
     let capabilities = serde_json::to_value(server_capabilities())?;
     connection.initialize(capabilities)?;
-    log_message(connection, "server initialized!")?;
+    log_message(&connection, "server initialized!")?;
 
     let mut server = Server::default();
     for message in &connection.receiver {
@@ -35,13 +35,13 @@ pub fn run(connection: &Connection) -> ServerResult<()> {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                server.handle_request(connection, request)?;
+                server.handle_request(&connection, request)?;
             }
             Message::Notification(notification) => {
                 let method = notification.method.clone();
-                if let Err(error) = server.handle_notification(connection, notification) {
+                if let Err(error) = server.handle_notification(&connection, notification) {
                     log_message(
-                        connection,
+                        &connection,
                         format!("Invalid {method} notification: {error}"),
                     )?;
                 }
@@ -289,7 +289,7 @@ mod tests {
     impl TestServer {
         fn start() -> Self {
             let (server, client) = lsp_server::Connection::memory();
-            let thread = thread::spawn(move || run(&server).unwrap());
+            let thread = thread::spawn(move || run(server).unwrap());
             let mut test_server = Self {
                 client,
                 thread,
