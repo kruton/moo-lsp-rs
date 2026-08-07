@@ -117,11 +117,61 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build_wasm:
+    name: Build web
+    runs-on: ubuntu-26.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust target
+        run: rustup target add wasm32-wasip1-threads
+
+      - name: Install WASI SDK
+        env:
+          WASI_SDK_SHA256: 0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce
+          WASI_SDK_VERSION: "33.0"
+        run: |
+          archive="wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          curl --fail --location --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/${archive}"
+          echo "${WASI_SDK_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}"
+
+      - name: Build WebAssembly language server
+        env:
+          CC_wasm32_wasip1_threads: ${{ runner.temp }}/wasi-sdk-33.0-x86_64-linux/bin/clang
+          WASI_SDK_PATH: ${{ runner.temp }}/wasi-sdk-33.0-x86_64-linux
+        run: cargo build --locked --release --target wasm32-wasip1-threads
+
+      - name: Create archive
+        run: |
+          mkdir -p dist/web
+          cp target/wasm32-wasip1-threads/release/moo-lsp-rs.wasm dist/web/moo-lsp-rs.wasm
+          tar -C dist -czf moo-lsp-rs-web.tar.gz web
+
+      - name: Attest release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: moo-lsp-rs-web.tar.gz
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-wasm
+          path: moo-lsp-rs-web.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: ubuntu-24.04
+    needs: [build, build_wasm]
+    runs-on: ubuntu-26.04
     permissions:
       attestations: write
       contents: write

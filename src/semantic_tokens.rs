@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use tower_lsp::lsp_types::{SemanticToken, SemanticTokenType, SemanticTokensLegend};
+use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokensLegend};
 use tree_sitter::Node;
 
 const VARIABLE: u32 = 0;
