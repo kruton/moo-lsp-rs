@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::line_index::LineIndex;
-use tower_lsp::lsp_types::*;
+use lsp_types::*;
 use tree_sitter::{Node, Parser, Tree};
 
 pub fn create_parser() -> Parser {
