@@ -118,7 +118,7 @@ jobs:
           retention-days: 14
 
   build_wasm:
-    name: Build web
+    name: Build VS Code web
     runs-on: ubuntu-26.04
     permissions:
       attestations: write
@@ -167,10 +167,46 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build_browser:
+    name: Build browser
+    runs-on: ubuntu-26.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Build browser language server
+        run: wasm-pack build --release --target web --out-dir dist/browser
+
+      - name: Create archive
+        run: tar -C dist -czf moo-lsp-rs-browser.tar.gz browser
+
+      - name: Attest release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: moo-lsp-rs-browser.tar.gz
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-wasm
+          path: moo-lsp-rs-browser.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, build_wasm]
+    needs: [build, build_wasm, build_browser]
     runs-on: ubuntu-26.04
     permissions:
       attestations: write

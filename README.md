@@ -11,15 +11,38 @@ formatting.
 Version tags matching `vX.Y.Z` build language-server binaries for the VS Code
 desktop targets `linux-x64`, `linux-arm64`, `linux-armhf`, `alpine-x64`,
 `alpine-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64`,
-plus a `web` target for vscode.dev. Each archive contains the binary under a
+plus two WebAssembly targets. Each platform archive contains the binary under a
 directory named for its VS Code target, so an extension packaging job can extract
-all ten archives into one `dist` directory. The web archive contains
-`web/moo-lsp-rs.wasm`, built for `wasm32-wasip1-threads`.
+the native and `web` archives into one `dist` directory.
 
-The web binary uses the same stdio LSP transport as the native binaries. A web
-extension should run it with `@vscode/wasm-wasi-lsp`, using
-`createStdioOptions()`, `startServer()`, shared WebAssembly memory, and a workspace
-folder mount. This requires the `ms-vscode.wasm-wasi-core` extension on the host.
+`moo-lsp-rs-web.tar.gz` supports vscode.dev. It contains `web/moo-lsp-rs.wasm`,
+built for `wasm32-wasip1-threads`, and uses the stdio LSP transport with
+`@vscode/wasm-wasi-lsp`, shared WebAssembly memory, and a workspace folder mount.
+It requires `ms-vscode.wasm-wasi-core` on the host.
+
+`moo-lsp-rs-browser.tar.gz` contains an ES module, TypeScript declarations, and
+WebAssembly built for `wasm32-unknown-unknown`. This package is intended for
+CodeMirror and other browser clients.
+
+The browser module has no WASI dependency and exchanges complete, headerless
+JSON-RPC messages. Run it in a dedicated worker and pass CodeMirror LSP messages
+directly to `BrowserServer.handle_message`. The method accepts one serialized
+JSON-RPC object and returns a serialized array of response/notification objects:
+
+```js
+import init, { BrowserServer } from "./browser/moo_lsp_rs.js";
+
+await init();
+const server = new BrowserServer();
+
+self.onmessage = ({ data }) => {
+  const outgoing = JSON.parse(server.handle_message(JSON.stringify(data)));
+  for (const message of outgoing) self.postMessage(message);
+};
+```
+
+The native and VS Code web binaries use the stdio transport. The browser package
+does not import `wasi:thread-spawn` and does not require a VS Code extension host.
 
 Every archive and the release checksum manifest have GitHub build-provenance
 attestations. After downloading an asset, verify its origin and integrity with:

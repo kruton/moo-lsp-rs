@@ -33,8 +33,24 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release
 
+  browser:
+    name: Build browser WebAssembly language server
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Build WebAssembly language server
+        run: wasm-pack build --release --target web --out-dir dist/browser
+
   wasm:
-    name: Build WebAssembly language server
+    name: Build VS Code WebAssembly language server
     runs-on: ubuntu-26.04
     steps:
       - name: Check out source

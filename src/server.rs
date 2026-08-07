@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
+use crate::{formatting, line_index::LineIndex, parser, semantic_tokens};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
@@ -19,7 +20,6 @@ use lsp_types::{
     SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Uri,
 };
-use moo_lsp_rs::{formatting, line_index::LineIndex, parser, semantic_tokens};
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -52,6 +52,91 @@ pub fn run(connection: Connection) -> ServerResult<()> {
     Ok(())
 }
 
+/// A transport-independent LSP session.
+///
+/// Each input is one complete, headerless JSON-RPC message. Callers deliver the
+/// messages returned by [`Session::handle`] to the client in order.
+#[derive(Default)]
+pub struct Session {
+    server: Server,
+    initialized: bool,
+    shutdown_requested: bool,
+}
+
+impl Session {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn handle(&mut self, message: Message) -> Vec<Message> {
+        let mut output = Vec::new();
+        match message {
+            Message::Request(request) if request.method == "initialize" => {
+                if self.initialized {
+                    output.push(error_response(
+                        request.id,
+                        ErrorCode::InvalidRequest,
+                        "Server is already initialized".to_owned(),
+                    ));
+                } else {
+                    self.initialized = true;
+                    output.push(Message::Response(Response::new_ok(
+                        request.id,
+                        serde_json::json!({ "capabilities": server_capabilities() }),
+                    )));
+                }
+            }
+            Message::Request(request) if request.method == "shutdown" => {
+                self.shutdown_requested = true;
+                output.push(Message::Response(Response::new_ok(request.id, ())));
+            }
+            Message::Request(request) if !self.initialized || self.shutdown_requested => {
+                output.push(error_response(
+                    request.id,
+                    ErrorCode::InvalidRequest,
+                    "Server is not running".to_owned(),
+                ));
+            }
+            Message::Request(request) => self.server.handle_request_to(&mut output, request),
+            Message::Notification(notification) if notification.method == "initialized" => {
+                push_log(&mut output, "server initialized!");
+            }
+            Message::Notification(notification) if notification.method == "exit" => {}
+            Message::Notification(notification) if self.initialized && !self.shutdown_requested => {
+                let method = notification.method.clone();
+                if let Err(error) = self
+                    .server
+                    .handle_notification_to(&mut output, notification)
+                {
+                    push_log(
+                        &mut output,
+                        format!("Invalid {method} notification: {error}"),
+                    );
+                }
+            }
+            Message::Notification(_) | Message::Response(_) => {}
+        }
+        output
+    }
+}
+
+fn error_response(id: RequestId, code: ErrorCode, message: String) -> Message {
+    Message::Response(Response::new_err(id, code as i32, message))
+}
+
+fn push_log(output: &mut Vec<Message>, message: impl Into<String>) {
+    output.push(
+        lsp_server::Notification::new(
+            LogMessage::METHOD.to_owned(),
+            LogMessageParams {
+                typ: MessageType::INFO,
+                message: message.into(),
+            },
+        )
+        .into(),
+    );
+}
+
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -73,6 +158,92 @@ struct Server {
 }
 
 impl Server {
+    fn handle_request_to(&self, output: &mut Vec<Message>, request: Request) {
+        match request.method.as_str() {
+            SemanticTokensFullRequest::METHOD => {
+                let params =
+                    match serde_json::from_value::<SemanticTokensParams>(request.params.clone()) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                let result = self.documents.get(&params.text_document.uri).map(|text| {
+                    SemanticTokensResult::Tokens(SemanticTokens {
+                        result_id: None,
+                        data: semantic_tokens::collect(text),
+                    })
+                });
+                output.push(Message::Response(Response::new_ok(request.id, result)));
+            }
+            Formatting::METHOD => {
+                let params = match serde_json::from_value::<DocumentFormattingParams>(
+                    request.params.clone(),
+                ) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        output.push(error_response(
+                            request.id,
+                            ErrorCode::InvalidParams,
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.formatting(&params),
+                )));
+            }
+            _ => output.push(error_response(
+                request.id,
+                ErrorCode::MethodNotFound,
+                format!("Unsupported method: {}", request.method),
+            )),
+        }
+    }
+
+    fn handle_notification_to(
+        &mut self,
+        output: &mut Vec<Message>,
+        notification: lsp_server::Notification,
+    ) -> Result<(), serde_json::Error> {
+        match notification.method.as_str() {
+            DidOpenTextDocument::METHOD => {
+                let params: DidOpenTextDocumentParams =
+                    serde_json::from_value(notification.params)?;
+                push_log(output, "file opened!");
+                let uri = params.text_document.uri;
+                let text = params.text_document.text;
+                self.documents.insert(uri.clone(), text.clone());
+                validate_document_to(output, uri, text);
+            }
+            DidChangeTextDocument::METHOD => {
+                let params: DidChangeTextDocumentParams =
+                    serde_json::from_value(notification.params)?;
+                push_log(output, "file changed!");
+                if let Some(content) = params.content_changes.into_iter().next() {
+                    let uri = params.text_document.uri;
+                    self.documents.insert(uri.clone(), content.text.clone());
+                    validate_document_to(output, uri, content.text);
+                }
+            }
+            DidCloseTextDocument::METHOD => {
+                let params: DidCloseTextDocumentParams =
+                    serde_json::from_value(notification.params)?;
+                self.documents.remove(&params.text_document.uri);
+                push_diagnostics(output, params.text_document.uri, Vec::new());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_request(&self, connection: &Connection, request: Request) -> ServerResult<()> {
         match request.method.as_str() {
             SemanticTokensFullRequest::METHOD => {
@@ -160,6 +331,32 @@ impl Server {
             new_text,
         }])
     }
+}
+
+fn push_diagnostics(output: &mut Vec<Message>, uri: Uri, diagnostics: Vec<lsp_types::Diagnostic>) {
+    output.push(
+        lsp_server::Notification::new(
+            PublishDiagnostics::METHOD.to_owned(),
+            PublishDiagnosticsParams::new(uri, diagnostics, None),
+        )
+        .into(),
+    );
+}
+
+fn validate_document_to(output: &mut Vec<Message>, uri: Uri, text: String) {
+    push_log(output, format!("Validating {}", uri.as_str()));
+    let line_index = LineIndex::new(&text);
+    let mut diagnostics = Vec::new();
+    if let Some(tree) = parser::parse(&text) {
+        let root = tree.root_node();
+        if root.has_error() {
+            push_log(output, "Syntax errors detected");
+            parser::collect_diagnostics(root, &line_index, &mut diagnostics);
+        } else {
+            push_log(output, "Parse successful");
+        }
+    }
+    push_diagnostics(output, uri, diagnostics);
 }
 
 fn request_params<T>(connection: &Connection, request: &Request) -> ServerResult<Option<T>>
@@ -278,7 +475,35 @@ mod tests {
         WorkDoneProgressParams,
     };
 
-    use super::run;
+    use super::{Session, run};
+
+    #[test]
+    fn headerless_session_initializes_and_replies() {
+        let mut session = Session::new();
+        let initialize: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .unwrap();
+        let output = session.handle(initialize);
+        assert_eq!(output.len(), 1);
+        let response = serde_json::to_value(&output[0]).unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["capabilities"]["textDocumentSync"], 1);
+
+        let unsupported: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "moo/unknown",
+            "params": null
+        }))
+        .unwrap();
+        let output = session.handle(unsupported);
+        let response = serde_json::to_value(&output[0]).unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+    }
 
     struct TestServer {
         client: lsp_server::Connection,
