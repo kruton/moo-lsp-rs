@@ -14,27 +14,14 @@ pub fn safe_slice(text: &str, range: impl std::ops::RangeBounds<usize>) -> &str 
         std::ops::Bound::Unbounded => text.len(),
     };
 
-    let start = start.min(text.len());
-    let end = end.min(text.len());
+    let start = text.ceil_char_boundary(start);
+    let end = text.floor_char_boundary(end);
 
     if start >= end {
         return "";
     }
 
-    let mut s = start;
-    while s < text.len() && !text.is_char_boundary(s) {
-        s += 1;
-    }
-    let mut e = end;
-    while e > s && !text.is_char_boundary(e) {
-        e -= 1;
-    }
-
-    if s >= e {
-        return "";
-    }
-
-    &text[s..e]
+    &text[start..end]
 }
 
 use lsp_types::{Position, Range};
