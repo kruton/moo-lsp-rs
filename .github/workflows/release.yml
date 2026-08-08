@@ -10,8 +10,43 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify release metadata
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify Cargo.lock and release tag
+        shell: bash
+        run: |
+          cargo tree --locked >/dev/null
+
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          package_version="$(jq --raw-output '.packages[] | select(.name == "moo-lsp-rs") | .version' <<<"${metadata}")"
+          lock_version="$(awk '$0 == "name = \"moo-lsp-rs\"" { package = 1; next } package && /^version = / { gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+
+          if [[ -z "${package_version}" ]]; then
+            echo "Could not determine the moo-lsp-rs package version" >&2
+            exit 1
+          fi
+
+          if [[ "${lock_version}" != "${package_version}" ]]; then
+            echo "Cargo.lock version ${lock_version:-<missing>} does not match Cargo.toml version ${package_version}; run cargo check to update Cargo.lock" >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            expected_tag="v${package_version}"
+            if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+              echo "Release tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${package_version}; expected ${expected_tag}" >&2
+              exit 1
+            fi
+          fi
+
   build:
     name: Build ${{ matrix.vscode_target }}
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +154,7 @@ jobs:
 
   build_wasm:
     name: Build VS Code web
+    needs: verify
     runs-on: ubuntu-26.04
     permissions:
       attestations: write
@@ -169,6 +205,7 @@ jobs:
 
   build_browser:
     name: Build browser
+    needs: verify
     runs-on: ubuntu-26.04
     permissions:
       attestations: write
