@@ -116,11 +116,13 @@ fn is_standalone_expression(node: Node<'_>) -> bool {
     false
 }
 
+use crate::line_index::safe_slice;
+
 fn classify_identifier(node: Node<'_>, text: &str) -> u32 {
     const TYPE_VALUES: &[&str] = &[
         "INT", "NUM", "OBJ", "STR", "ERR", "LIST", "FLOAT", "MAP", "BOOL", "WAIF",
     ];
-    let identifier = &text[node.byte_range()];
+    let identifier = safe_slice(text, node.byte_range());
     if TYPE_VALUES
         .iter()
         .any(|type_value| identifier.eq_ignore_ascii_case(type_value))
@@ -140,7 +142,7 @@ fn classify_identifier(node: Node<'_>, text: &str) -> u32 {
 }
 
 fn preceded_by(node: Node<'_>, text: &str, marker: char) -> bool {
-    text[..node.start_byte()]
+    safe_slice(text, 0..node.start_byte())
         .chars()
         .rev()
         .find(|c| !c.is_whitespace())
@@ -156,11 +158,14 @@ fn push_range(
 ) {
     let mut offset = start;
     while offset < end {
-        let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = text[offset..end]
+        let line_start = safe_slice(text, 0..offset)
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line_end = safe_slice(text, offset..end)
             .find('\n')
             .map_or(end, |index| offset + index);
-        let content_end = if line_end > offset && text.as_bytes()[line_end - 1] == b'\r' {
+        let content_end = if line_end > offset && text.as_bytes().get(line_end - 1) == Some(&b'\r')
+        {
             line_end - 1
         } else {
             line_end
@@ -168,12 +173,12 @@ fn push_range(
 
         if content_end > offset {
             tokens.push(AbsoluteToken {
-                line: text[..line_start]
+                line: safe_slice(text, 0..line_start)
                     .bytes()
                     .filter(|byte| *byte == b'\n')
                     .count() as u32,
-                start: text[line_start..offset].encode_utf16().count() as u32,
-                length: text[offset..content_end].encode_utf16().count() as u32,
+                start: safe_slice(text, line_start..offset).encode_utf16().count() as u32,
+                length: safe_slice(text, offset..content_end).encode_utf16().count() as u32,
                 token_type,
             });
         }

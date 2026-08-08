@@ -58,6 +58,38 @@ fn test_unclosed_block_diagnostics() {
 }
 
 #[test]
+fn test_diagnostic_range_within_line_bounds() {
+    let code = "if (x)\n  b = 1;";
+    let tree = parser::parse(code).unwrap();
+    let line_index = LineIndex::new(code);
+    let mut diagnostics = Vec::new();
+    parser::collect_diagnostics(tree.root_node(), &line_index, code, &mut diagnostics);
+    assert!(!diagnostics.is_empty());
+    for d in &diagnostics {
+        let line_str = code
+            .split_inclusive('\n')
+            .nth(d.range.start.line as usize)
+            .unwrap();
+        let content = line_str.strip_suffix('\n').unwrap_or(line_str);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        let max_utf16 = content.encode_utf16().count() as u32;
+
+        assert!(
+            d.range.start.character <= max_utf16,
+            "Start character {} exceeds line length {}",
+            d.range.start.character,
+            max_utf16
+        );
+        assert!(
+            d.range.end.character <= max_utf16,
+            "End character {} exceeds line length {}",
+            d.range.end.character,
+            max_utf16
+        );
+    }
+}
+
+#[test]
 fn test_mismatched_block_terminator_diagnostic() {
     let code = "if (x)\n  b = 1;\nendfor;";
     let tree = parser::parse(code).unwrap();

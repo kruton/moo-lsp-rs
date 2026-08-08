@@ -46,7 +46,9 @@ pub fn format(text: &str) -> Option<String> {
             _ => (content, ""),
         };
 
-        let events = &line_events[line_number];
+        let events = line_events
+            .get(line_number)
+            .map_or(&[][..], |v| v.as_slice());
         let starts_with_dedent = events
             .first()
             .is_some_and(|ev| matches!(ev, IndentEvent::Branch | IndentEvent::End));
@@ -78,10 +80,13 @@ fn collect_indent_events(node: Node<'_>, source: &[u8], lines: &mut [Vec<IndentE
 
     while let Some(m) = matches.next() {
         for cap in m.captures {
-            let cap_name = &query.capture_names()[cap.index as usize];
+            let cap_name = match query.capture_names().get(cap.index as usize) {
+                Some(name) => *name,
+                None => continue,
+            };
             let row = cap.node.start_position().row;
 
-            let event = match *cap_name {
+            let event = match cap_name {
                 "indent.begin" => IndentEvent::Begin,
                 "indent.branch" => IndentEvent::Branch,
                 "indent.end" => IndentEvent::End,

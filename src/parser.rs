@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use crate::line_index::LineIndex;
+use crate::line_index::{LineIndex, safe_slice};
 use lsp_types::*;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -63,7 +63,7 @@ pub fn collect_document_symbols(node: Node, text: &str) -> Vec<DocumentSymbol> {
                 },
             };
 
-            let raw_text = text[cap_node.byte_range()].trim();
+            let raw_text = safe_slice(text, cap_node.byte_range()).trim();
             if raw_text.is_empty() {
                 continue;
             }
@@ -122,7 +122,7 @@ pub fn collect_folding_ranges(node: Node, text: &str) -> Vec<FoldingRange> {
 
 pub fn collect_diagnostics(
     node: Node,
-    _line_index: &LineIndex,
+    line_index: &LineIndex,
     text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -132,31 +132,24 @@ pub fn collect_diagnostics(
 
     while let Some(m) = matches.next() {
         for cap in m.captures {
-            let cap_name = &query.capture_names()[cap.index as usize];
+            let cap_name = match query.capture_names().get(cap.index as usize) {
+                Some(name) => *name,
+                None => continue,
+            };
             let cap_node = cap.node;
 
             let start_pos = cap_node.start_position();
             let end_pos = cap_node.end_position();
 
-            let (end_line, end_col) =
-                if start_pos.row == end_pos.row && start_pos.column == end_pos.column {
-                    (start_pos.row as u32, (start_pos.column + 1) as u32)
-                } else {
-                    (end_pos.row as u32, end_pos.column as u32)
-                };
+            let range = line_index.clamp_range(
+                text,
+                start_pos.row,
+                start_pos.column,
+                end_pos.row,
+                end_pos.column,
+            );
 
-            let range = Range {
-                start: Position {
-                    line: start_pos.row as u32,
-                    character: start_pos.column as u32,
-                },
-                end: Position {
-                    line: end_line,
-                    character: end_col,
-                },
-            };
-
-            let message = match *cap_name {
+            let message = match cap_name {
                 "missing_endif" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
@@ -262,17 +255,27 @@ pub fn collect_diagnostics(
     }
 
     // Also check for orphan control statements parsed as top-level identifiers
-    collect_orphan_keywords(node, text, diagnostics);
+    collect_orphan_keywords(node, line_index, text, diagnostics);
 }
 
-fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnostic>) {
+fn collect_orphan_keywords(
+    node: Node,
+    line_index: &LineIndex,
+    text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     if node.kind() == "expression_statement" {
-        let stmt_text = text[node.byte_range()].trim().trim_end_matches(';').trim();
+        let stmt_text = safe_slice(text, node.byte_range())
+            .trim()
+            .trim_end_matches(';')
+            .trim();
         match stmt_text {
             "endif" => {
                 if find_parent_of_kind(node, &["if_statement"]).is_none() {
                     push_orphan_diagnostic(
                         node,
+                        line_index,
+                        text,
                         "Unmatched 'endif' without a corresponding 'if' statement",
                         diagnostics,
                     );
@@ -282,6 +285,8 @@ fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnos
                 if find_parent_of_kind(node, &["for_statement"]).is_none() {
                     push_orphan_diagnostic(
                         node,
+                        line_index,
+                        text,
                         "Unmatched 'endfor' without a corresponding 'for' loop",
                         diagnostics,
                     );
@@ -291,6 +296,8 @@ fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnos
                 if find_parent_of_kind(node, &["while_statement"]).is_none() {
                     push_orphan_diagnostic(
                         node,
+                        line_index,
+                        text,
                         "Unmatched 'endwhile' without a corresponding 'while' loop",
                         diagnostics,
                     );
@@ -300,6 +307,8 @@ fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnos
                 if find_parent_of_kind(node, &["fork_statement"]).is_none() {
                     push_orphan_diagnostic(
                         node,
+                        line_index,
+                        text,
                         "Unmatched 'endfork' without a corresponding 'fork' block",
                         diagnostics,
                     );
@@ -308,6 +317,8 @@ fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnos
             "endtry" if find_parent_of_kind(node, &["try_statement"]).is_none() => {
                 push_orphan_diagnostic(
                     node,
+                    line_index,
+                    text,
                     "Unmatched 'endtry' without a corresponding 'try' block",
                     diagnostics,
                 );
@@ -318,24 +329,27 @@ fn collect_orphan_keywords(node: Node, text: &str, diagnostics: &mut Vec<Diagnos
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_orphan_keywords(child, text, diagnostics);
+        collect_orphan_keywords(child, line_index, text, diagnostics);
     }
 }
 
-fn push_orphan_diagnostic(node: Node, message: &str, diagnostics: &mut Vec<Diagnostic>) {
+fn push_orphan_diagnostic(
+    node: Node,
+    line_index: &LineIndex,
+    text: &str,
+    message: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let start_pos = node.start_position();
     let end_pos = node.end_position();
 
-    let range = Range {
-        start: Position {
-            line: start_pos.row as u32,
-            character: start_pos.column as u32,
-        },
-        end: Position {
-            line: end_pos.row as u32,
-            character: end_pos.column as u32,
-        },
-    };
+    let range = line_index.clamp_range(
+        text,
+        start_pos.row,
+        start_pos.column,
+        end_pos.row,
+        end_pos.column,
+    );
 
     if !diagnostics
         .iter()
@@ -376,7 +390,10 @@ fn find_mismatched_end_token(node: Node, text: &str, expected: &str) -> Option<&
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let child_text = text[child.byte_range()].trim().trim_end_matches(';').trim();
+        let child_text = safe_slice(text, child.byte_range())
+            .trim()
+            .trim_end_matches(';')
+            .trim();
         for &(token, name) in END_TOKENS {
             if child_text == token && token != expected {
                 return Some(name);
@@ -390,7 +407,7 @@ fn find_mismatched_end_token(node: Node, text: &str, expected: &str) -> Option<&
 }
 
 fn format_error_message(node: Node, text: &str) -> String {
-    let raw_slice = &text[node.byte_range()];
+    let raw_slice = safe_slice(text, node.byte_range());
     let trimmed = raw_slice.trim();
 
     if trimmed == "endif" || trimmed.starts_with("endif;") {
@@ -455,7 +472,7 @@ fn format_error_message(node: Node, text: &str) -> String {
         return format!("Expected expression after operator '{}'", first_char);
     }
 
-    let prev_text = &text[..node.start_byte()];
+    let prev_text = safe_slice(text, 0..node.start_byte());
     if let Some(last_char) = prev_text.chars().rev().find(|c| !c.is_whitespace()) {
         match last_char {
             '.' => return "Expected property name after '.'".to_string(),

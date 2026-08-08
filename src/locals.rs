@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+use crate::line_index::safe_slice;
 use lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Position, Range, Uri};
 use std::sync::LazyLock;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
@@ -27,9 +28,12 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
 
     while let Some(m) = matches.next() {
         for cap in m.captures {
-            let cap_name = &query.capture_names()[cap.index as usize];
+            let cap_name = match query.capture_names().get(cap.index as usize) {
+                Some(name) => *name,
+                None => continue,
+            };
             let cap_node = cap.node;
-            let name = text[cap_node.byte_range()].trim().to_string();
+            let name = safe_slice(text, cap_node.byte_range()).trim().to_string();
 
             if name.is_empty() {
                 continue;
@@ -48,7 +52,7 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
                 },
             };
 
-            let is_definition = match *cap_name {
+            let is_definition = match cap_name {
                 "local.definition" => true,
                 "local.reference" => false,
                 _ => continue,
