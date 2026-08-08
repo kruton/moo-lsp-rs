@@ -219,6 +219,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install wasm-pack
+        # renovate: datasource=crate depName=wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 
       - name: Build browser language server
