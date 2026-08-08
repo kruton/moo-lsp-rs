@@ -34,6 +34,65 @@ static FOLD_QUERY: LazyLock<Query> = LazyLock::new(|| {
         .expect("Failed to compile folding Tree-sitter query")
 });
 
+static TAGS_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    let language = tree_sitter_lambdamoo::LANGUAGE.into();
+    Query::new(&language, tree_sitter_lambdamoo::TAGS_QUERY)
+        .expect("Failed to compile tags Tree-sitter query")
+});
+
+pub fn collect_document_symbols(node: Node, text: &str) -> Vec<DocumentSymbol> {
+    let query = &*TAGS_QUERY;
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, node, text.as_bytes());
+    let mut symbols = Vec::new();
+
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let cap_node = cap.node;
+            let start_pos = cap_node.start_position();
+            let end_pos = cap_node.end_position();
+
+            let range = Range {
+                start: Position {
+                    line: start_pos.row as u32,
+                    character: start_pos.column as u32,
+                },
+                end: Position {
+                    line: end_pos.row as u32,
+                    character: end_pos.column as u32,
+                },
+            };
+
+            let raw_text = text[cap_node.byte_range()].trim();
+            if raw_text.is_empty() {
+                continue;
+            }
+
+            let (name, kind) = match cap_node.kind() {
+                "call_expression" => (raw_text.to_string(), SymbolKind::FUNCTION),
+                "verb_call" => (raw_text.to_string(), SymbolKind::METHOD),
+                "prop_access" => (raw_text.to_string(), SymbolKind::PROPERTY),
+                "assignment" => (raw_text.to_string(), SymbolKind::VARIABLE),
+                _ => (raw_text.to_string(), SymbolKind::VARIABLE),
+            };
+
+            #[allow(deprecated)]
+            symbols.push(DocumentSymbol {
+                name,
+                detail: None,
+                kind,
+                tags: None,
+                deprecated: None,
+                range,
+                selection_range: range,
+                children: None,
+            });
+        }
+    }
+
+    symbols
+}
+
 pub fn collect_folding_ranges(node: Node, text: &str) -> Vec<FoldingRange> {
     let query = &*FOLD_QUERY;
     let mut cursor = QueryCursor::new();

@@ -142,6 +142,14 @@ fn test_collect_folding_ranges() {
 }
 
 #[test]
+fn test_collect_document_symbols() {
+    let code = "a = 1;\nnotify(player);\nitem:run();\n";
+    let tree = parser::parse(code).unwrap();
+    let symbols = parser::collect_document_symbols(tree.root_node(), code);
+    assert!(!symbols.is_empty());
+}
+
+#[test]
 fn test_all_features() {
     let snippets = vec![
         // Statements
