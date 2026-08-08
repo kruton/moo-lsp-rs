@@ -123,6 +123,56 @@ pub fn collect_folding_ranges(node: Node, text: &str) -> Vec<FoldingRange> {
     ranges
 }
 
+fn push_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    range: Range,
+    message: String,
+    code: &str,
+    related_information: Option<Vec<DiagnosticRelatedInformation>>,
+) {
+    let code_val = Some(NumberOrString::String(code.to_string()));
+    if !diagnostics
+        .iter()
+        .any(|d| d.range == range && d.message == message)
+    {
+        diagnostics.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: code_val,
+            code_description: None,
+            source: Some("moo-lsp-rs".to_string()),
+            message,
+            related_information,
+            tags: None,
+            data: None,
+        });
+    }
+}
+
+fn make_related_info(
+    parent: Node,
+    line_index: &LineIndex,
+    text: &str,
+    block_keyword: &str,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let start_pos = parent.start_position();
+    let open_range = line_index.clamp_range(
+        text,
+        start_pos.row,
+        start_pos.column,
+        start_pos.row,
+        start_pos.column + block_keyword.len(),
+    );
+    let uri = "file:///document".parse::<Uri>().ok()?;
+    Some(vec![DiagnosticRelatedInformation {
+        location: Location {
+            uri,
+            range: open_range,
+        },
+        message: format!("'{}' block opened here", block_keyword),
+    }])
+}
+
 pub fn collect_diagnostics(
     node: Node,
     line_index: &LineIndex,
@@ -152,11 +202,13 @@ pub fn collect_diagnostics(
                 end_pos.column,
             );
 
-            let message = match cap_name {
+            match cap_name {
                 "missing_endif" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
-                    if let Some(mismatched) = find_mismatched_end_token(parent, text, "endif") {
+                    let message = if let Some(mismatched) =
+                        find_mismatched_end_token(parent, text, "endif")
+                    {
                         format!(
                             "Mismatched block terminator: found '{}', expected 'endif' for 'if' statement on line {}",
                             mismatched, open_line
@@ -166,12 +218,16 @@ pub fn collect_diagnostics(
                             "Unclosed 'if' statement (opened on line {}); expected matching 'endif'",
                             open_line
                         )
-                    }
+                    };
+                    let related = make_related_info(parent, line_index, text, "if");
+                    push_diagnostic(diagnostics, range, message, "unclosed-block", related);
                 }
                 "missing_endfor" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
-                    if let Some(mismatched) = find_mismatched_end_token(parent, text, "endfor") {
+                    let message = if let Some(mismatched) =
+                        find_mismatched_end_token(parent, text, "endfor")
+                    {
                         format!(
                             "Mismatched block terminator: found '{}', expected 'endfor' for 'for' loop on line {}",
                             mismatched, open_line
@@ -181,12 +237,16 @@ pub fn collect_diagnostics(
                             "Unclosed 'for' loop (opened on line {}); expected matching 'endfor'",
                             open_line
                         )
-                    }
+                    };
+                    let related = make_related_info(parent, line_index, text, "for");
+                    push_diagnostic(diagnostics, range, message, "unclosed-block", related);
                 }
                 "missing_endwhile" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
-                    if let Some(mismatched) = find_mismatched_end_token(parent, text, "endwhile") {
+                    let message = if let Some(mismatched) =
+                        find_mismatched_end_token(parent, text, "endwhile")
+                    {
                         format!(
                             "Mismatched block terminator: found '{}', expected 'endwhile' for 'while' loop on line {}",
                             mismatched, open_line
@@ -196,12 +256,16 @@ pub fn collect_diagnostics(
                             "Unclosed 'while' loop (opened on line {}); expected matching 'endwhile'",
                             open_line
                         )
-                    }
+                    };
+                    let related = make_related_info(parent, line_index, text, "while");
+                    push_diagnostic(diagnostics, range, message, "unclosed-block", related);
                 }
                 "missing_endfork" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
-                    if let Some(mismatched) = find_mismatched_end_token(parent, text, "endfork") {
+                    let message = if let Some(mismatched) =
+                        find_mismatched_end_token(parent, text, "endfork")
+                    {
                         format!(
                             "Mismatched block terminator: found '{}', expected 'endfork' for 'fork' block on line {}",
                             mismatched, open_line
@@ -211,12 +275,16 @@ pub fn collect_diagnostics(
                             "Unclosed 'fork' block (opened on line {}); expected matching 'endfork'",
                             open_line
                         )
-                    }
+                    };
+                    let related = make_related_info(parent, line_index, text, "fork");
+                    push_diagnostic(diagnostics, range, message, "unclosed-block", related);
                 }
                 "missing_endtry" => {
                     let parent = cap_node.parent().unwrap_or(cap_node);
                     let open_line = parent.start_position().row + 1;
-                    if let Some(mismatched) = find_mismatched_end_token(parent, text, "endtry") {
+                    let message = if let Some(mismatched) =
+                        find_mismatched_end_token(parent, text, "endtry")
+                    {
                         format!(
                             "Mismatched block terminator: found '{}', expected 'endtry' for 'try' block on line {}",
                             mismatched, open_line
@@ -226,39 +294,179 @@ pub fn collect_diagnostics(
                             "Unclosed 'try' block (opened on line {}); expected matching 'endtry'",
                             open_line
                         )
+                    };
+                    let related = make_related_info(parent, line_index, text, "try");
+                    push_diagnostic(diagnostics, range, message, "unclosed-block", related);
+                }
+                "missing_paren" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Missing closing parenthesis ')'".to_string(),
+                        "unclosed-delimiter",
+                        None,
+                    );
+                }
+                "missing_bracket" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Missing closing bracket ']'".to_string(),
+                        "unclosed-delimiter",
+                        None,
+                    );
+                }
+                "missing_brace" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Missing closing brace '}'".to_string(),
+                        "unclosed-delimiter",
+                        None,
+                    );
+                }
+                "missing_single_quote" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Missing closing single quote '\''".to_string(),
+                        "unclosed-delimiter",
+                        None,
+                    );
+                }
+                "missing_semicolon" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Missing ';' at end of statement".to_string(),
+                        "missing-semicolon",
+                        None,
+                    );
+                }
+                "error" => {
+                    if find_parent_of_kind(cap_node, &["ERROR"]).is_none() {
+                        process_error_node(cap_node, text, range, diagnostics);
                     }
                 }
-                "missing_paren" => "Missing closing parenthesis ')'".to_string(),
-                "missing_bracket" => "Missing closing bracket ']'".to_string(),
-                "missing_brace" => "Missing closing brace '}'".to_string(),
-                "missing_single_quote" => "Missing closing single quote '\''".to_string(),
-                "missing_semicolon" => "Missing ';' at end of statement".to_string(),
-                "error" => format_error_message(cap_node, text),
-                _ => "Syntax error".to_string(),
-            };
-
-            // Avoid duplicate range diagnostics if same range and message already pushed
-            if !diagnostics
-                .iter()
-                .any(|d| d.range == range && d.message == message)
-            {
-                diagnostics.push(Diagnostic {
-                    range,
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("moo-lsp-rs".to_string()),
-                    message,
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                _ => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Syntax error".to_string(),
+                        "syntax-error",
+                        None,
+                    );
+                }
             }
         }
     }
 
     // Also check for orphan control statements parsed as top-level identifiers
     collect_orphan_keywords(node, line_index, text, diagnostics);
+}
+
+fn process_error_node(node: Node, text: &str, range: Range, diagnostics: &mut Vec<Diagnostic>) {
+    let raw_slice = safe_slice(text, node.byte_range());
+    let trimmed = raw_slice.trim();
+
+    let mut paren_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in trimmed.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' => paren_depth += 1,
+            ')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+            }
+            '[' => bracket_depth += 1,
+            ']' => {
+                if bracket_depth > 0 {
+                    bracket_depth -= 1;
+                }
+            }
+            '{' => brace_depth += 1,
+            '}' if brace_depth > 0 => {
+                brace_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    let unclosed = if paren_depth > 0 {
+        Some("Missing closing parenthesis ')'")
+    } else if bracket_depth > 0 {
+        Some("Missing closing bracket ']'")
+    } else if brace_depth > 0 {
+        Some("Missing closing brace '}'")
+    } else {
+        None
+    };
+
+    let is_block_header = trimmed.starts_with("if")
+        || trimmed.starts_with("for")
+        || trimmed.starts_with("while")
+        || trimmed.starts_with("fork")
+        || trimmed.starts_with("try");
+
+    let missing_semicolon = !trimmed.ends_with(';') && !is_block_header;
+
+    let mut pushed_specific = false;
+
+    if let Some(unclosed_msg) = unclosed {
+        push_diagnostic(
+            diagnostics,
+            range,
+            unclosed_msg.to_string(),
+            "unclosed-delimiter",
+            None,
+        );
+        pushed_specific = true;
+    }
+
+    if missing_semicolon {
+        let is_keyword_or_op = trimmed == "."
+            || trimmed.starts_with('.')
+            || trimmed == ":"
+            || trimmed.starts_with(':')
+            || trimmed == "$"
+            || trimmed.starts_with('$')
+            || (trimmed.starts_with('"')
+                && (!trimmed[1..].contains('"') || trimmed.ends_with('\\')))
+            || (!trimmed.is_empty() && trimmed.chars().all(|c| "+-*/%^=<>&|!~".contains(c)));
+
+        if !is_keyword_or_op {
+            push_diagnostic(
+                diagnostics,
+                range,
+                "Missing ';' at end of statement".to_string(),
+                "missing-semicolon",
+                None,
+            );
+            pushed_specific = true;
+        }
+    }
+
+    if !pushed_specific {
+        let msg = format_error_message(node, text);
+        push_diagnostic(diagnostics, range, msg, "syntax-error", None);
+    }
 }
 
 fn collect_orphan_keywords(
@@ -354,22 +562,13 @@ fn push_orphan_diagnostic(
         end_pos.column,
     );
 
-    if !diagnostics
-        .iter()
-        .any(|d| d.range == range && d.message == message)
-    {
-        diagnostics.push(Diagnostic {
-            range,
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: None,
-            code_description: None,
-            source: Some("moo-lsp-rs".to_string()),
-            message: message.to_string(),
-            related_information: None,
-            tags: None,
-            data: None,
-        });
-    }
+    push_diagnostic(
+        diagnostics,
+        range,
+        message.to_string(),
+        "unclosed-block",
+        None,
+    );
 }
 
 fn find_parent_of_kind<'a>(mut node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {

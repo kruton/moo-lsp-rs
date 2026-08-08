@@ -260,3 +260,71 @@ fn test_all_features() {
         );
     }
 }
+
+#[test]
+fn test_unbalanced_paren_and_missing_semicolon_diagnostic() {
+    let code = "notify(player";
+    let tree = parser::parse(code).unwrap();
+    let line_index = LineIndex::new(code);
+    let mut diagnostics = Vec::new();
+    parser::collect_diagnostics(tree.root_node(), &line_index, code, &mut diagnostics);
+    assert_eq!(diagnostics.len(), 2);
+
+    assert_eq!(diagnostics[0].message, "Missing closing parenthesis ')'");
+    assert_eq!(
+        diagnostics[0].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("unclosed-delimiter".to_string())
+    );
+
+    assert_eq!(diagnostics[1].message, "Missing ';' at end of statement");
+    assert_eq!(
+        diagnostics[1].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("missing-semicolon".to_string())
+    );
+}
+
+#[test]
+fn test_diagnostic_codes_and_related_info() {
+    let code = "if (x)\n  b = 1;\n";
+    let tree = parser::parse(code).unwrap();
+    let line_index = LineIndex::new(code);
+    let mut diagnostics = Vec::new();
+    parser::collect_diagnostics(tree.root_node(), &line_index, code, &mut diagnostics);
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("unclosed-block".to_string())
+    );
+    let related = diagnostics[0]
+        .related_information
+        .as_ref()
+        .expect("Expected related_information");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].location.range.start.line, 0);
+    assert_eq!(related[0].location.range.start.character, 0);
+    assert_eq!(related[0].message, "'if' block opened here");
+
+    let code_bracket = "a = [1, 2";
+    let tree_bracket = parser::parse(code_bracket).unwrap();
+    let line_index_bracket = LineIndex::new(code_bracket);
+    let mut diags_bracket = Vec::new();
+    parser::collect_diagnostics(
+        tree_bracket.root_node(),
+        &line_index_bracket,
+        code_bracket,
+        &mut diags_bracket,
+    );
+    assert_eq!(diags_bracket.len(), 2);
+
+    assert_eq!(diags_bracket[0].message, "Missing closing bracket ']'");
+    assert_eq!(
+        diags_bracket[0].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("unclosed-delimiter".to_string())
+    );
+    assert_eq!(diags_bracket[1].message, "Missing ';' at end of statement");
+    assert_eq!(
+        diags_bracket[1].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("missing-semicolon".to_string())
+    );
+}
