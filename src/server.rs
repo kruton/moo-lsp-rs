@@ -906,4 +906,62 @@ mod tests {
         assert_eq!(unsupported.response_result.unwrap_err().code, -32601);
         server.stop();
     }
+
+    #[test]
+    fn handles_formatting_with_invalid_documents_open() {
+        let mut server = TestServer::start();
+        let invalid_uri: Uri = "file:///invalid.moo".parse().unwrap();
+        let valid_uri: Uri = "file:///valid.moo".parse().unwrap();
+
+        server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: invalid_uri.clone(),
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "if (x\n  b = 1;\n".to_owned(),
+            },
+        });
+        let diags = server.next_diagnostics();
+        assert!(!diags.diagnostics.is_empty());
+
+        server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: valid_uri.clone(),
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "if (x)\n  b = 1;\nendif;\n".to_owned(),
+            },
+        });
+        assert!(server.next_diagnostics().diagnostics.is_empty());
+
+        let format_invalid = server.request(
+            Formatting::METHOD,
+            DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri: invalid_uri },
+                options: FormattingOptions {
+                    tab_size: 2,
+                    insert_spaces: true,
+                    ..Default::default()
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        );
+        assert!(format_invalid.response_result.unwrap().is_null());
+
+        let format_valid = server.request(
+            Formatting::METHOD,
+            DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri: valid_uri },
+                options: FormattingOptions {
+                    tab_size: 2,
+                    insert_spaces: true,
+                    ..Default::default()
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        );
+        assert!(format_valid.response_result.unwrap().is_array());
+
+        server.stop();
+    }
 }
