@@ -45,7 +45,7 @@ jobs:
 
       - name: Install wasm-pack
         # renovate: datasource=crate depName=wasm-pack
-        run: cargo install wasm-pack --version 0.13.1 --locked
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Build WebAssembly language server
         run: wasm-pack build --release --target web --out-dir dist/browser
