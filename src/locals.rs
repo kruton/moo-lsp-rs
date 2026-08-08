@@ -100,6 +100,11 @@ pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) ->
 }
 
 pub fn find_highlights(root: Node, text: &str, position: Position) -> Vec<DocumentHighlight> {
+    let delimiter_highlights = find_delimiter_or_keyword_highlights(root, text, position);
+    if !delimiter_highlights.is_empty() {
+        return delimiter_highlights;
+    }
+
     let locals = collect_locals(root, text);
     let Some(target_symbol) = locals.iter().find(|s| position_in_range(position, s.range)) else {
         return Vec::new();
@@ -118,6 +123,223 @@ pub fn find_highlights(root: Node, text: &str, position: Position) -> Vec<Docume
             },
         })
         .collect()
+}
+
+fn find_delimiter_or_keyword_highlights(
+    root: Node,
+    text: &str,
+    position: Position,
+) -> Vec<DocumentHighlight> {
+    let point = tree_sitter::Point {
+        row: position.line as usize,
+        column: position.character as usize,
+    };
+
+    let node_at = root.descendant_for_point_range(point, point);
+    let mut candidate_nodes_expanded = Vec::new();
+    if let Some(n) = node_at {
+        candidate_nodes_expanded.push(n);
+        if let Some(p) = n.parent() {
+            candidate_nodes_expanded.push(p);
+        }
+    }
+    if point.column > 0 {
+        let prev_point = tree_sitter::Point {
+            row: point.row,
+            column: point.column - 1,
+        };
+        if let Some(prev_node) = root.descendant_for_point_range(prev_point, prev_point) {
+            candidate_nodes_expanded.push(prev_node);
+            if let Some(p) = prev_node.parent() {
+                candidate_nodes_expanded.push(p);
+            }
+        }
+    }
+
+    for node in candidate_nodes_expanded {
+        let kind = node.kind();
+        let node_slice = safe_slice(text, node.byte_range()).trim();
+
+        if (kind == "(" || kind == ")")
+            && let Some(parent) = node.parent()
+        {
+            let highlights = find_matching_token_children(parent, "(", ")");
+            if !highlights.is_empty() {
+                return highlights;
+            }
+        }
+
+        if (kind == "[" || kind == "]")
+            && let Some(parent) = node.parent()
+        {
+            let highlights = find_matching_token_children(parent, "[", "]");
+            if !highlights.is_empty() {
+                return highlights;
+            }
+        }
+
+        if (kind == "{" || kind == "}")
+            && let Some(parent) = node.parent()
+        {
+            let highlights = find_matching_token_children(parent, "{", "}");
+            if !highlights.is_empty() {
+                return highlights;
+            }
+        }
+
+        match node_slice {
+            "if" | "elseif" | "else" | "endif" => {
+                if let Some(stmt_node) = find_ancestor_of_kind(node, "if_statement") {
+                    let highlights =
+                        find_matching_keywords(stmt_node, text, &["if", "elseif", "else", "endif"]);
+                    if !highlights.is_empty() {
+                        return highlights;
+                    }
+                }
+            }
+            "for" | "endfor" => {
+                if let Some(stmt_node) = find_ancestor_of_kind(node, "for_statement") {
+                    let highlights = find_matching_keywords(stmt_node, text, &["for", "endfor"]);
+                    if !highlights.is_empty() {
+                        return highlights;
+                    }
+                }
+            }
+            "while" | "endwhile" => {
+                if let Some(stmt_node) = find_ancestor_of_kind(node, "while_statement") {
+                    let highlights =
+                        find_matching_keywords(stmt_node, text, &["while", "endwhile"]);
+                    if !highlights.is_empty() {
+                        return highlights;
+                    }
+                }
+            }
+            "fork" | "endfork" => {
+                if let Some(stmt_node) = find_ancestor_of_kind(node, "fork_statement") {
+                    let highlights = find_matching_keywords(stmt_node, text, &["fork", "endfork"]);
+                    if !highlights.is_empty() {
+                        return highlights;
+                    }
+                }
+            }
+            "try" | "except" | "finally" | "endtry" => {
+                if let Some(stmt_node) = find_ancestor_of_kind(node, "try_statement") {
+                    let highlights = find_matching_keywords(
+                        stmt_node,
+                        text,
+                        &["try", "except", "finally", "endtry"],
+                    );
+                    if !highlights.is_empty() {
+                        return highlights;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Vec::new()
+}
+
+fn find_matching_token_children(
+    parent: Node,
+    open_kind: &str,
+    close_kind: &str,
+) -> Vec<DocumentHighlight> {
+    let mut open_node = None;
+    let mut close_node = None;
+    let mut cursor = parent.walk();
+    for child in parent.children(&mut cursor) {
+        if child.kind() == open_kind && open_node.is_none() {
+            open_node = Some(child);
+        } else if child.kind() == close_kind {
+            close_node = Some(child);
+        }
+    }
+
+    let mut result = Vec::new();
+    if let Some(o) = open_node {
+        let start = o.start_position();
+        let end = o.end_position();
+        result.push(DocumentHighlight {
+            range: Range {
+                start: Position {
+                    line: start.row as u32,
+                    character: start.column as u32,
+                },
+                end: Position {
+                    line: end.row as u32,
+                    character: end.column as u32,
+                },
+            },
+            kind: Some(DocumentHighlightKind::TEXT),
+        });
+    }
+    if let Some(c) = close_node {
+        let start = c.start_position();
+        let end = c.end_position();
+        result.push(DocumentHighlight {
+            range: Range {
+                start: Position {
+                    line: start.row as u32,
+                    character: start.column as u32,
+                },
+                end: Position {
+                    line: end.row as u32,
+                    character: end.column as u32,
+                },
+            },
+            kind: Some(DocumentHighlightKind::TEXT),
+        });
+    }
+    if result.len() == 2 {
+        result
+    } else {
+        Vec::new()
+    }
+}
+
+fn find_matching_keywords(
+    stmt_node: Node,
+    text: &str,
+    keywords: &[&str],
+) -> Vec<DocumentHighlight> {
+    let mut result = Vec::new();
+    let mut cursor = stmt_node.walk();
+    for child in stmt_node.children(&mut cursor) {
+        let child_slice = safe_slice(text, child.byte_range())
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+        if keywords.contains(&child_slice) {
+            let start = child.start_position();
+            let end = Position {
+                line: start.row as u32,
+                character: (start.column + child_slice.len()) as u32,
+            };
+            result.push(DocumentHighlight {
+                range: Range {
+                    start: Position {
+                        line: start.row as u32,
+                        character: start.column as u32,
+                    },
+                    end,
+                },
+                kind: Some(DocumentHighlightKind::TEXT),
+            });
+        }
+    }
+    result
+}
+
+fn find_ancestor_of_kind<'a>(mut node: Node<'a>, target_kind: &str) -> Option<Node<'a>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == target_kind {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
 }
 
 fn position_in_range(pos: Position, range: Range) -> bool {
@@ -177,5 +399,33 @@ mod tests {
         };
         let highlights = find_highlights(tree.root_node(), code, pos);
         assert_eq!(highlights.len(), 2);
+    }
+
+    #[test]
+    fn test_find_highlights_delimiters() {
+        let code = "notify(player);\n";
+        let tree = parser::parse(code).unwrap();
+        let pos_open = Position {
+            line: 0,
+            character: 6,
+        };
+        let highlights = find_highlights(tree.root_node(), code, pos_open);
+        assert_eq!(highlights.len(), 2);
+        assert_eq!(highlights[0].range.start.character, 6);
+        assert_eq!(highlights[1].range.start.character, 13);
+    }
+
+    #[test]
+    fn test_find_highlights_block_keywords() {
+        let code = "if (x)\n  b = 1;\nendif;\n";
+        let tree = parser::parse(code).unwrap();
+        let pos_if = Position {
+            line: 0,
+            character: 0,
+        };
+        let highlights = find_highlights(tree.root_node(), code, pos_if);
+        assert_eq!(highlights.len(), 2);
+        assert_eq!(highlights[0].range.start.line, 0);
+        assert_eq!(highlights[1].range.start.line, 2);
     }
 }
