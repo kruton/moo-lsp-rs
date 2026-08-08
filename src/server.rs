@@ -351,7 +351,7 @@ fn validate_document_to(output: &mut Vec<Message>, uri: Uri, text: String) {
         let root = tree.root_node();
         if root.has_error() {
             push_log(output, "Syntax errors detected");
-            parser::collect_diagnostics(root, &line_index, &mut diagnostics);
+            parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
         } else {
             push_log(output, "Parse successful");
         }
@@ -440,7 +440,7 @@ fn validate_document(connection: &Connection, uri: Uri, text: String) -> ServerR
         let root = tree.root_node();
         if root.has_error() {
             log_message(connection, "Syntax errors detected")?;
-            parser::collect_diagnostics(root, &line_index, &mut diagnostics);
+            parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
         } else {
             log_message(connection, "Parse successful")?;
         }
