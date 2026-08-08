@@ -132,6 +132,16 @@ fn test_missing_delimiters_and_operators() {
 }
 
 #[test]
+fn test_collect_folding_ranges() {
+    let code = "if (x)\n  b = 1;\n  c = 2;\nendif;\n";
+    let tree = parser::parse(code).unwrap();
+    let folds = parser::collect_folding_ranges(tree.root_node(), code);
+    assert_eq!(folds.len(), 1);
+    assert_eq!(folds[0].start_line, 0);
+    assert_eq!(folds[0].end_line, 3);
+}
+
+#[test]
 fn test_all_features() {
     let snippets = vec![
         // Statements

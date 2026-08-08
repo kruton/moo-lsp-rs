@@ -28,6 +28,39 @@ static ERROR_QUERY: LazyLock<Query> = LazyLock::new(|| {
         .expect("Failed to compile diagnostic Tree-sitter query")
 });
 
+static FOLD_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    let language = tree_sitter_lambdamoo::LANGUAGE.into();
+    Query::new(&language, tree_sitter_lambdamoo::FOLDS_QUERY)
+        .expect("Failed to compile folding Tree-sitter query")
+});
+
+pub fn collect_folding_ranges(node: Node, text: &str) -> Vec<FoldingRange> {
+    let query = &*FOLD_QUERY;
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, node, text.as_bytes());
+    let mut ranges = Vec::new();
+
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let start_pos = cap.node.start_position();
+            let end_pos = cap.node.end_position();
+
+            if start_pos.row < end_pos.row {
+                ranges.push(FoldingRange {
+                    start_line: start_pos.row as u32,
+                    start_character: Some(start_pos.column as u32),
+                    end_line: end_pos.row as u32,
+                    end_character: Some(end_pos.column as u32),
+                    kind: Some(FoldingRangeKind::Region),
+                    collapsed_text: None,
+                });
+            }
+        }
+    }
+
+    ranges
+}
+
 pub fn collect_diagnostics(
     node: Node,
     _line_index: &LineIndex,
