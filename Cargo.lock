@@ -312,9 +312,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-lambdamoo"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9245ed12dd688706f57211e16d00c5dc2d9fabab38c7da32dda97655106c861"
+checksum = "0e88add05f31d0a8c054d2a846ec563ee165a017ab0311e7b1a816928ff201e8"
 dependencies = [
  "cc",
  "tree-sitter-language",
