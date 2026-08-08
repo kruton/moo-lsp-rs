@@ -12,15 +12,17 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    FoldingRangeRequest, Formatting, Request as LspRequest, SemanticTokensFullRequest,
+    DocumentSymbolRequest, FoldingRangeRequest, Formatting, Request as LspRequest,
+    SemanticTokensFullRequest,
 };
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
-    LogMessageParams, MessageType, OneOf, Position, PublishDiagnosticsParams, Range,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
+    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, LogMessageParams, MessageType, OneOf,
+    Position, PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Uri,
 };
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -151,6 +153,7 @@ fn server_capabilities() -> ServerCapabilities {
         )),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -219,6 +222,24 @@ impl Server {
                 output.push(Message::Response(Response::new_ok(
                     request.id,
                     self.folding_range(&params),
+                )));
+            }
+            DocumentSymbolRequest::METHOD => {
+                let params =
+                    match serde_json::from_value::<DocumentSymbolParams>(request.params.clone()) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.document_symbols(&params),
                 )));
             }
             _ => output.push(error_response(
@@ -297,6 +318,14 @@ impl Server {
                 let result = self.folding_range(&params);
                 send_ok(connection, request.id, result)?;
             }
+            DocumentSymbolRequest::METHOD => {
+                let Some(params) = request_params::<DocumentSymbolParams>(connection, &request)?
+                else {
+                    return Ok(());
+                };
+                let result = self.document_symbols(&params);
+                send_ok(connection, request.id, result)?;
+            }
             _ => {
                 send_error(
                     connection,
@@ -364,6 +393,13 @@ impl Server {
         let text = self.documents.get(&params.text_document.uri)?;
         let tree = parser::parse(text)?;
         Some(parser::collect_folding_ranges(tree.root_node(), text))
+    }
+
+    fn document_symbols(&self, params: &DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
+        let text = self.documents.get(&params.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        let symbols = parser::collect_document_symbols(tree.root_node(), text);
+        Some(DocumentSymbolResponse::Nested(symbols))
     }
 }
 
@@ -501,14 +537,15 @@ mod tests {
         Notification as _, PublishDiagnostics,
     };
     use lsp_types::request::{
-        FoldingRangeRequest, Formatting, Request as _, SemanticTokensFullRequest, Shutdown,
+        DocumentSymbolRequest, FoldingRangeRequest, Formatting, Request as _,
+        SemanticTokensFullRequest, Shutdown,
     };
     use lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, FoldingRangeParams, FormattingOptions, InitializeParams,
-        InitializedParams, Position, PublishDiagnosticsParams, SemanticTokensParams,
-        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Uri,
-        VersionedTextDocumentIdentifier, WorkDoneProgressParams,
+        DocumentFormattingParams, DocumentSymbolParams, FoldingRangeParams, FormattingOptions,
+        InitializeParams, InitializedParams, Position, PublishDiagnosticsParams,
+        SemanticTokensParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+        TextDocumentItem, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
     };
 
     use super::{Session, run};
@@ -724,6 +761,22 @@ mod tests {
         );
         let fold_list = folds.response_result.unwrap().as_array().unwrap().clone();
         assert_eq!(fold_list.len(), 1);
+
+        let doc_symbols = server.request(
+            DocumentSymbolRequest::METHOD,
+            DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri: uri() },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        let symbol_list = doc_symbols
+            .response_result
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!symbol_list.is_empty());
 
         server.notify::<DidCloseTextDocument>(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: uri() },
