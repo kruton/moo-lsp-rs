@@ -2,11 +2,25 @@
 //
 // SPDX-License-Identifier: MIT
 
-use tree_sitter::Node;
+use std::sync::LazyLock;
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use crate::parser;
 
 const INDENT_WIDTH: usize = 2;
+
+static INDENT_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    let language = tree_sitter_lambdamoo::LANGUAGE.into();
+    Query::new(&language, tree_sitter_lambdamoo::INDENTS_QUERY)
+        .expect("Failed to compile indentation Tree-sitter query")
+});
+
+#[derive(Clone, Copy, Debug)]
+enum IndentEvent {
+    Begin,
+    Branch,
+    End,
+}
 
 /// Format a verb in the same two-space block style used by `verb_code()`.
 ///
@@ -19,8 +33,8 @@ pub fn format(text: &str) -> Option<String> {
     }
 
     let line_count = text.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let mut keywords = vec![Vec::new(); line_count];
-    collect_keywords(tree.root_node(), text.as_bytes(), &mut keywords);
+    let mut line_events = vec![Vec::new(); line_count];
+    collect_indent_events(tree.root_node(), text.as_bytes(), &mut line_events);
 
     let mut depth = 0usize;
     let mut formatted = String::with_capacity(text.len());
@@ -32,21 +46,10 @@ pub fn format(text: &str) -> Option<String> {
             _ => (content, ""),
         };
 
-        let line_keywords = &keywords[line_number];
-        let starts_with_dedent = line_keywords.first().is_some_and(|keyword| {
-            matches!(
-                keyword.as_str(),
-                "elseif"
-                    | "else"
-                    | "except"
-                    | "finally"
-                    | "endif"
-                    | "endfor"
-                    | "endwhile"
-                    | "endfork"
-                    | "endtry"
-            )
-        });
+        let events = &line_events[line_number];
+        let starts_with_dedent = events
+            .first()
+            .is_some_and(|ev| matches!(ev, IndentEvent::Branch | IndentEvent::End));
         let line_depth = depth.saturating_sub(usize::from(starts_with_dedent));
 
         let trimmed = content.trim_start_matches([' ', '\t']);
@@ -56,17 +59,11 @@ pub fn format(text: &str) -> Option<String> {
         }
         formatted.push_str(newline);
 
-        for keyword in line_keywords {
-            match keyword.as_str() {
-                "if" | "for" | "while" | "fork" | "try" => depth += 1,
-                "elseif" | "else" | "except" | "finally" => {
-                    // These close one arm and open the next, so the net depth
-                    // is unchanged.
-                }
-                "endif" | "endfor" | "endwhile" | "endfork" | "endtry" => {
-                    depth = depth.saturating_sub(1);
-                }
-                _ => {}
+        for event in events {
+            match event {
+                IndentEvent::Begin => depth += 1,
+                IndentEvent::Branch => {}
+                IndentEvent::End => depth = depth.saturating_sub(1),
             }
         }
     }
@@ -74,34 +71,27 @@ pub fn format(text: &str) -> Option<String> {
     Some(formatted)
 }
 
-fn collect_keywords(node: Node<'_>, source: &[u8], lines: &mut [Vec<String>]) {
-    if node.child_count() == 0 {
-        let kind = node.kind();
-        if matches!(
-            kind,
-            "if" | "elseif"
-                | "else"
-                | "endif"
-                | "for"
-                | "endfor"
-                | "while"
-                | "endwhile"
-                | "fork"
-                | "endfork"
-                | "try"
-                | "except"
-                | "finally"
-                | "endtry"
-        ) && node.utf8_text(source).is_ok()
-        {
-            lines[node.start_position().row].push(kind.to_owned());
-        }
-        return;
-    }
+fn collect_indent_events(node: Node<'_>, source: &[u8], lines: &mut [Vec<IndentEvent>]) {
+    let query = &*INDENT_QUERY;
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, node, source);
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_keywords(child, source, lines);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let cap_name = &query.capture_names()[cap.index as usize];
+            let row = cap.node.start_position().row;
+
+            let event = match *cap_name {
+                "indent.begin" => IndentEvent::Begin,
+                "indent.branch" => IndentEvent::Branch,
+                "indent.end" => IndentEvent::End,
+                _ => continue,
+            };
+
+            if row < lines.len() {
+                lines[row].push(event);
+            }
+        }
     }
 }
 
