@@ -345,7 +345,7 @@ pub fn collect_diagnostics(
                 }
                 "error" => {
                     if find_parent_of_kind(cap_node, &["ERROR"]).is_none() {
-                        process_error_node(cap_node, text, range, diagnostics);
+                        process_error_node(cap_node, line_index, text, range, diagnostics);
                     }
                 }
                 _ => {
@@ -365,9 +365,33 @@ pub fn collect_diagnostics(
     collect_orphan_keywords(node, line_index, text, diagnostics);
 }
 
-fn process_error_node(node: Node, text: &str, range: Range, diagnostics: &mut Vec<Diagnostic>) {
+fn process_error_node(
+    node: Node,
+    line_index: &LineIndex,
+    text: &str,
+    range: Range,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let raw_slice = safe_slice(text, node.byte_range());
     let trimmed = raw_slice.trim();
+
+    if let Some((keyword, terminator, description)) = block_header(trimmed) {
+        let open_line = node.start_position().row + 1;
+        let message = if let Some(mismatched) = find_mismatched_end_token(node, text, terminator) {
+            format!(
+                "Mismatched block terminator: found '{}', expected '{}' for {} on line {}",
+                mismatched, terminator, description, open_line
+            )
+        } else {
+            format!(
+                "Unclosed {} (opened on line {}); expected matching '{}'",
+                description, open_line, terminator
+            )
+        };
+        let related = make_related_info(node, line_index, text, keyword);
+        push_diagnostic(diagnostics, range, message, "unclosed-block", related);
+        return;
+    }
 
     let mut paren_depth: i32 = 0;
     let mut bracket_depth: i32 = 0;
@@ -419,13 +443,7 @@ fn process_error_node(node: Node, text: &str, range: Range, diagnostics: &mut Ve
         None
     };
 
-    let is_block_header = trimmed.starts_with("if")
-        || trimmed.starts_with("for")
-        || trimmed.starts_with("while")
-        || trimmed.starts_with("fork")
-        || trimmed.starts_with("try");
-
-    let missing_semicolon = !trimmed.ends_with(';') && !is_block_header;
+    let missing_semicolon = !trimmed.ends_with(';');
 
     let mut pushed_specific = false;
 
@@ -466,6 +484,21 @@ fn process_error_node(node: Node, text: &str, range: Range, diagnostics: &mut Ve
     if !pushed_specific {
         let msg = format_error_message(node, text);
         push_diagnostic(diagnostics, range, msg, "syntax-error", None);
+    }
+}
+
+fn block_header(text: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let keyword = text
+        .split_once(|ch: char| ch.is_whitespace() || ch == '(')
+        .map_or(text, |(keyword, _)| keyword);
+
+    match keyword {
+        "if" => Some(("if", "endif", "'if' statement")),
+        "for" => Some(("for", "endfor", "'for' loop")),
+        "while" => Some(("while", "endwhile", "'while' loop")),
+        "fork" => Some(("fork", "endfork", "'fork' block")),
+        "try" => Some(("try", "endtry", "'try' block")),
+        _ => None,
     }
 }
 

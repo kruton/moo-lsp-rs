@@ -66,25 +66,27 @@ fn test_diagnostic_range_within_line_bounds() {
     parser::collect_diagnostics(tree.root_node(), &line_index, code, &mut diagnostics);
     assert!(!diagnostics.is_empty());
     for d in &diagnostics {
-        let line_str = code
-            .split_inclusive('\n')
-            .nth(d.range.start.line as usize)
-            .unwrap();
-        let content = line_str.strip_suffix('\n').unwrap_or(line_str);
-        let content = content.strip_suffix('\r').unwrap_or(content);
-        let max_utf16 = content.encode_utf16().count() as u32;
+        let line_len = |line: u32| {
+            let line_str = code.split_inclusive('\n').nth(line as usize).unwrap();
+            let content = line_str.strip_suffix('\n').unwrap_or(line_str);
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            content.encode_utf16().count() as u32
+        };
+
+        let start_max_utf16 = line_len(d.range.start.line);
+        let end_max_utf16 = line_len(d.range.end.line);
 
         assert!(
-            d.range.start.character <= max_utf16,
+            d.range.start.character <= start_max_utf16,
             "Start character {} exceeds line length {}",
             d.range.start.character,
-            max_utf16
+            start_max_utf16
         );
         assert!(
-            d.range.end.character <= max_utf16,
+            d.range.end.character <= end_max_utf16,
             "End character {} exceeds line length {}",
             d.range.end.character,
-            max_utf16
+            end_max_utf16
         );
     }
 }
