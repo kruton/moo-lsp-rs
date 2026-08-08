@@ -7,6 +7,9 @@ use lsp_types::*;
 use tree_sitter::{Node, Parser, Tree};
 
 pub fn create_parser() -> Parser {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    crate::tree_sitter_allocator::install();
+
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_lambdamoo::LANGUAGE.into())
