@@ -11,14 +11,16 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
     PublishDiagnostics,
 };
-use lsp_types::request::{Formatting, Request as LspRequest, SemanticTokensFullRequest};
+use lsp_types::request::{
+    FoldingRangeRequest, Formatting, Request as LspRequest, SemanticTokensFullRequest,
+};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, LogMessageParams, MessageType, OneOf, Position,
-    PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Uri,
+    DocumentFormattingParams, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    LogMessageParams, MessageType, OneOf, Position, PublishDiagnosticsParams, Range,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
 };
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -148,6 +150,7 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         document_formatting_provider: Some(OneOf::Left(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         ..Default::default()
     }
 }
@@ -198,6 +201,24 @@ impl Server {
                 output.push(Message::Response(Response::new_ok(
                     request.id,
                     self.formatting(&params),
+                )));
+            }
+            FoldingRangeRequest::METHOD => {
+                let params =
+                    match serde_json::from_value::<FoldingRangeParams>(request.params.clone()) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.folding_range(&params),
                 )));
             }
             _ => output.push(error_response(
@@ -268,6 +289,14 @@ impl Server {
                 let result = self.formatting(&params);
                 send_ok(connection, request.id, result)?;
             }
+            FoldingRangeRequest::METHOD => {
+                let Some(params) = request_params::<FoldingRangeParams>(connection, &request)?
+                else {
+                    return Ok(());
+                };
+                let result = self.folding_range(&params);
+                send_ok(connection, request.id, result)?;
+            }
             _ => {
                 send_error(
                     connection,
@@ -322,7 +351,6 @@ impl Server {
         if new_text == *text {
             return Some(Vec::new());
         }
-
         Some(vec![TextEdit {
             range: Range {
                 start: Position::new(0, 0),
@@ -330,6 +358,12 @@ impl Server {
             },
             new_text,
         }])
+    }
+
+    fn folding_range(&self, params: &FoldingRangeParams) -> Option<Vec<FoldingRange>> {
+        let text = self.documents.get(&params.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        Some(parser::collect_folding_ranges(tree.root_node(), text))
     }
 }
 
@@ -466,13 +500,15 @@ mod tests {
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit, Initialized,
         Notification as _, PublishDiagnostics,
     };
-    use lsp_types::request::{Formatting, Request as _, SemanticTokensFullRequest, Shutdown};
+    use lsp_types::request::{
+        FoldingRangeRequest, Formatting, Request as _, SemanticTokensFullRequest, Shutdown,
+    };
     use lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, FormattingOptions, InitializeParams, InitializedParams, Position,
-        PublishDiagnosticsParams, SemanticTokensParams, TextDocumentContentChangeEvent,
-        TextDocumentIdentifier, TextDocumentItem, Uri, VersionedTextDocumentIdentifier,
-        WorkDoneProgressParams,
+        DocumentFormattingParams, FoldingRangeParams, FormattingOptions, InitializeParams,
+        InitializedParams, Position, PublishDiagnosticsParams, SemanticTokensParams,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Uri,
+        VersionedTextDocumentIdentifier, WorkDoneProgressParams,
     };
 
     use super::{Session, run};
@@ -677,6 +713,17 @@ mod tests {
             edits[0]["range"]["start"],
             serde_json::json!(Position::new(0, 0))
         );
+
+        let folds = server.request(
+            FoldingRangeRequest::METHOD,
+            FoldingRangeParams {
+                text_document: TextDocumentIdentifier { uri: uri() },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        let fold_list = folds.response_result.unwrap().as_array().unwrap().clone();
+        assert_eq!(fold_list.len(), 1);
 
         server.notify::<DidCloseTextDocument>(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: uri() },
