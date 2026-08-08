@@ -10,4 +10,7 @@ pub mod semantic_tokens;
 pub mod server;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod tree_sitter_allocator;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
