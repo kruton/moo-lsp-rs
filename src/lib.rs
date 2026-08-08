@@ -4,6 +4,7 @@
 
 pub mod formatting;
 pub mod line_index;
+pub mod locals;
 pub mod parser;
 pub mod semantic_tokens;
 pub mod server;

@@ -5,21 +5,22 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::{formatting, line_index::LineIndex, parser, semantic_tokens};
+use crate::{formatting, line_index::LineIndex, locals, parser, semantic_tokens};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    DocumentSymbolRequest, FoldingRangeRequest, Formatting, Request as LspRequest,
-    SemanticTokensFullRequest,
+    DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
+    GotoDefinition, Request as LspRequest, SemanticTokensFullRequest,
 };
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, FoldingRangeProviderCapability, LogMessageParams, MessageType, OneOf,
-    Position, PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, LogMessageParams, MessageType, OneOf, Position,
+    PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Uri,
@@ -154,6 +155,8 @@ fn server_capabilities() -> ServerCapabilities {
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -242,6 +245,43 @@ impl Server {
                     self.document_symbols(&params),
                 )));
             }
+            GotoDefinition::METHOD => {
+                let params =
+                    match serde_json::from_value::<GotoDefinitionParams>(request.params.clone()) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.definition(&params),
+                )));
+            }
+            DocumentHighlightRequest::METHOD => {
+                let params =
+                    match serde_json::from_value::<DocumentHighlightParams>(request.params.clone())
+                    {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.document_highlight(&params),
+                )));
+            }
             _ => output.push(error_response(
                 request.id,
                 ErrorCode::MethodNotFound,
@@ -326,6 +366,22 @@ impl Server {
                 let result = self.document_symbols(&params);
                 send_ok(connection, request.id, result)?;
             }
+            GotoDefinition::METHOD => {
+                let Some(params) = request_params::<GotoDefinitionParams>(connection, &request)?
+                else {
+                    return Ok(());
+                };
+                let result = self.definition(&params);
+                send_ok(connection, request.id, result)?;
+            }
+            DocumentHighlightRequest::METHOD => {
+                let Some(params) = request_params::<DocumentHighlightParams>(connection, &request)?
+                else {
+                    return Ok(());
+                };
+                let result = self.document_highlight(&params);
+                send_ok(connection, request.id, result)?;
+            }
             _ => {
                 send_error(
                     connection,
@@ -400,6 +456,34 @@ impl Server {
         let tree = parser::parse(text)?;
         let symbols = parser::collect_document_symbols(tree.root_node(), text);
         Some(DocumentSymbolResponse::Nested(symbols))
+    }
+
+    fn definition(&self, params: &GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let text = self.documents.get(uri)?;
+        let tree = parser::parse(text)?;
+        let loc = locals::find_definition(
+            tree.root_node(),
+            text,
+            params.text_document_position_params.position,
+            uri,
+        )?;
+        Some(GotoDefinitionResponse::Scalar(loc))
+    }
+
+    fn document_highlight(
+        &self,
+        params: &DocumentHighlightParams,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let text = self
+            .documents
+            .get(&params.text_document_position_params.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        Some(locals::find_highlights(
+            tree.root_node(),
+            text,
+            params.text_document_position_params.position,
+        ))
     }
 }
 
@@ -537,15 +621,16 @@ mod tests {
         Notification as _, PublishDiagnostics,
     };
     use lsp_types::request::{
-        DocumentSymbolRequest, FoldingRangeRequest, Formatting, Request as _,
-        SemanticTokensFullRequest, Shutdown,
+        DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
+        GotoDefinition, Request as _, SemanticTokensFullRequest, Shutdown,
     };
     use lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, DocumentSymbolParams, FoldingRangeParams, FormattingOptions,
-        InitializeParams, InitializedParams, Position, PublishDiagnosticsParams,
-        SemanticTokensParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-        TextDocumentItem, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
+        DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams,
+        FoldingRangeParams, FormattingOptions, GotoDefinitionParams, InitializeParams,
+        InitializedParams, Position, PublishDiagnosticsParams, SemanticTokensParams,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+        TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
     };
 
     use super::{Session, run};
@@ -777,6 +862,32 @@ mod tests {
             .unwrap()
             .clone();
         assert!(!symbol_list.is_empty());
+
+        let def_req = server.request(
+            GotoDefinition::METHOD,
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri() },
+                    position: Position::new(1, 4),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        assert!(def_req.response_result.is_ok());
+
+        let hl_req = server.request(
+            DocumentHighlightRequest::METHOD,
+            DocumentHighlightParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri() },
+                    position: Position::new(1, 4),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        assert!(hl_req.response_result.is_ok());
 
         server.notify::<DidCloseTextDocument>(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: uri() },
