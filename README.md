@@ -55,5 +55,26 @@ sha256sum --check SHA256SUMS
 The workflow can also be run manually to test every build without publishing a
 GitHub release.
 
+## Development WebAssembly builds
+
+Install the Rust targets and `wasm-pack` once:
+
+```sh
+make wasm-targets
+cargo install wasm-pack --locked
+```
+
+The VS Code build also needs the [WASI SDK](https://github.com/WebAssembly/wasi-sdk/releases)
+because Tree-sitter includes C code. Set `WASI_SDK_PATH` to the extracted SDK,
+then build both development bundles:
+
+```sh
+make wasm WASI_SDK_PATH=/path/to/wasi-sdk
+```
+
+The output is written to `dist/web/moo-lsp-rs.wasm` for VS Code and
+`dist/browser/` for browser clients. To build only one bundle, use
+`make wasm-vscode WASI_SDK_PATH=/path/to/wasi-sdk` or `make wasm-browser`.
+
 ## License
 Licensed under the MIT License. See LICENSE or file headers for details.

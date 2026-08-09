@@ -9,8 +9,11 @@ use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 static LOCALS_QUERY: LazyLock<Query> = LazyLock::new(|| {
     let language = tree_sitter_lambdamoo::LANGUAGE.into();
-    Query::new(&language, tree_sitter_lambdamoo::LOCALS_QUERY)
-        .expect("Failed to compile locals Tree-sitter query")
+    let query = format!(
+        "{}\n(scattering_assignment (scatter_list) @local.scatter)",
+        tree_sitter_lambdamoo::LOCALS_QUERY
+    );
+    Query::new(&language, &query).expect("Failed to compile locals Tree-sitter query")
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,12 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
                 None => continue,
             };
             let cap_node = cap.node;
+
+            if cap_name == "local.scatter" {
+                collect_scatter_definitions(cap_node, text, &line_index, &mut symbols);
+                continue;
+            }
+
             let name = safe_slice(text, cap_node.byte_range()).trim().to_string();
 
             if name.is_empty() {
@@ -81,6 +90,38 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
     symbols
 }
 
+fn collect_scatter_definitions(
+    scatter_list: Node,
+    text: &str,
+    line_index: &LineIndex,
+    symbols: &mut Vec<SymbolLocation>,
+) {
+    let mut cursor = scatter_list.walk();
+    let mut needs_target = true;
+    for child in scatter_list.children(&mut cursor) {
+        if child.kind() == "," {
+            needs_target = true;
+        } else if needs_target && child.kind() == "identifier" {
+            let range = line_index.clamp_range(
+                text,
+                child.start_position().row,
+                child.start_position().column,
+                child.end_position().row,
+                child.end_position().column,
+            );
+            let name = safe_slice(text, child.byte_range()).to_string();
+            if !symbols.iter().any(|s| s.range == range && s.is_definition) {
+                symbols.push(SymbolLocation {
+                    name,
+                    is_definition: true,
+                    range,
+                });
+            }
+            needs_target = false;
+        }
+    }
+}
+
 pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) -> Option<Location> {
     let locals = collect_locals(root, text);
     let target_symbol = locals
@@ -97,14 +138,80 @@ pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) ->
             locals.iter().find(|s| position_in_range(prev, s.range))
         })?;
 
-    // Find the definition of this symbol that occurs in the locals
+    let target_offset = position_to_byte_offset(text, target_symbol.range.start)?;
+
+    // Assignments evaluate their right-hand side before updating their target. Exclude
+    // assignment targets that enclose this reference, then use the most recent earlier
+    // definition.
     let def = locals
         .iter()
-        .find(|s| s.is_definition && s.name == target_symbol.name)?;
+        .filter(|s| {
+            s.is_definition
+                && s.name == target_symbol.name
+                && position_before_or_equal(s.range.end, target_symbol.range.start)
+                && !is_enclosing_assignment_target(root, text, s.range, target_offset)
+        })
+        .max_by_key(|s| (s.range.start.line, s.range.start.character))?;
     Some(Location {
         uri: uri.clone(),
         range: def.range,
     })
+}
+
+fn is_enclosing_assignment_target(
+    root: Node,
+    text: &str,
+    definition_range: Range,
+    target_offset: usize,
+) -> bool {
+    let Some(definition_offset) = position_to_byte_offset(text, definition_range.start) else {
+        return false;
+    };
+    let Some(mut node) = root.descendant_for_byte_range(definition_offset, definition_offset)
+    else {
+        return false;
+    };
+
+    loop {
+        if node.kind() == "assignment"
+            && node.named_child(0).is_some_and(|lhs| {
+                lhs.start_byte() <= definition_offset
+                    && definition_offset < lhs.end_byte()
+                    && lhs.end_byte() <= target_offset
+                    && target_offset < node.end_byte()
+            })
+        {
+            return true;
+        }
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        node = parent;
+    }
+}
+
+fn position_to_byte_offset(text: &str, position: Position) -> Option<usize> {
+    let line_start = text
+        .split_inclusive('\n')
+        .take(position.line as usize)
+        .map(str::len)
+        .sum::<usize>();
+    let line = text.get(line_start..)?.split('\n').next()?;
+    let mut utf16_col = 0;
+    for (byte_col, ch) in line.char_indices() {
+        if utf16_col == position.character as usize {
+            return Some(line_start + byte_col);
+        }
+        utf16_col += ch.len_utf16();
+        if utf16_col > position.character as usize {
+            return None;
+        }
+    }
+    (utf16_col == position.character as usize).then_some(line_start + line.len())
+}
+
+fn position_before_or_equal(left: Position, right: Position) -> bool {
+    (left.line, left.character) <= (right.line, right.character)
 }
 
 pub fn find_highlights(root: Node, text: &str, position: Position) -> Vec<DocumentHighlight> {
@@ -395,6 +502,34 @@ mod tests {
         let def_loc = find_definition(tree.root_node(), code, pos, &uri);
         assert!(def_loc.is_some());
         assert_eq!(def_loc.unwrap().range.start.line, 0);
+    }
+
+    #[test]
+    fn test_find_definition_on_rhs_of_reassignment_uses_previous_assignment() {
+        let code = "target = 1;\ntarget = target + 1;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+
+        let def_loc = find_definition(tree.root_node(), code, Position::new(1, 9), &uri).unwrap();
+
+        assert_eq!(
+            def_loc.range,
+            Range::new(Position::new(0, 0), Position::new(0, 6))
+        );
+    }
+
+    #[test]
+    fn test_find_definition_from_scatter_assignment() {
+        let code = "{x} = args;\ny = x;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+
+        let def_loc = find_definition(tree.root_node(), code, Position::new(1, 4), &uri).unwrap();
+
+        assert_eq!(
+            def_loc.range,
+            Range::new(Position::new(0, 1), Position::new(0, 2))
+        );
     }
 
     #[test]

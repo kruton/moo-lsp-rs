@@ -1,6 +1,7 @@
 # Cargo generated
 /debug
 /target
+/dist
 
 # rustfmt
 **/*.rs.bk
