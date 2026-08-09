@@ -343,6 +343,15 @@ pub fn collect_diagnostics(
                         None,
                     );
                 }
+                "invalid_identifier" => {
+                    push_diagnostic(
+                        diagnostics,
+                        range,
+                        "Keyword cannot be used as an identifier".to_string(),
+                        "invalid-identifier",
+                        None,
+                    );
+                }
                 "error" => {
                     if find_parent_of_kind(cap_node, &["ERROR"]).is_none() {
                         process_error_node(cap_node, line_index, text, range, diagnostics);

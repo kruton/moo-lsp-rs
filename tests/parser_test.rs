@@ -26,6 +26,29 @@ fn test_invalid_code() {
 }
 
 #[test]
+fn test_keyword_used_as_identifier_diagnostic() {
+    let code = "notify(if); result = E_NONE;";
+    let tree = parser::parse(code).unwrap();
+    assert!(!tree.root_node().has_error());
+
+    let line_index = LineIndex::new(code);
+    let mut diagnostics = Vec::new();
+    parser::collect_diagnostics(tree.root_node(), &line_index, code, &mut diagnostics);
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].message,
+        "Keyword cannot be used as an identifier"
+    );
+    assert_eq!(
+        diagnostics[0].code.as_ref().unwrap(),
+        &lsp_types::NumberOrString::String("invalid-identifier".to_string())
+    );
+    assert_eq!(diagnostics[0].range.start.character, 7);
+    assert_eq!(diagnostics[0].range.end.character, 9);
+}
+
+#[test]
 fn test_unclosed_block_diagnostics() {
     let code = "if (x)\n  b = 1;\n";
     let tree = parser::parse(code).unwrap();
