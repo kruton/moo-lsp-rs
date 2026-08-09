@@ -503,11 +503,11 @@ fn validate_document_to(output: &mut Vec<Message>, uri: Uri, text: String) {
     let mut diagnostics = Vec::new();
     if let Some(tree) = parser::parse(&text) {
         let root = tree.root_node();
-        if root.has_error() {
-            push_log(output, "Syntax errors detected");
-            parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
-        } else {
+        parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
+        if diagnostics.is_empty() {
             push_log(output, "Parse successful");
+        } else {
+            push_log(output, "Syntax errors detected");
         }
     }
     push_diagnostics(output, uri, diagnostics);
@@ -592,11 +592,11 @@ fn validate_document(connection: &Connection, uri: Uri, text: String) -> ServerR
     let mut diagnostics = Vec::new();
     if let Some(tree) = parser::parse(&text) {
         let root = tree.root_node();
-        if root.has_error() {
-            log_message(connection, "Syntax errors detected")?;
-            parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
-        } else {
+        parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
+        if diagnostics.is_empty() {
             log_message(connection, "Parse successful")?;
+        } else {
+            log_message(connection, "Syntax errors detected")?;
         }
     }
 
@@ -628,9 +628,10 @@ mod tests {
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
         DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams,
         FoldingRangeParams, FormattingOptions, GotoDefinitionParams, InitializeParams,
-        InitializedParams, Position, PublishDiagnosticsParams, SemanticTokensParams,
-        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-        TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
+        InitializedParams, NumberOrString, Position, PublishDiagnosticsParams, Range,
+        SemanticTokensParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+        TextDocumentItem, TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier,
+        WorkDoneProgressParams,
     };
 
     use super::{Session, run};
@@ -893,6 +894,32 @@ mod tests {
             text_document: TextDocumentIdentifier { uri: uri() },
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
+        server.stop();
+    }
+
+    #[test]
+    fn reports_invalid_identifier_without_tree_sitter_error() {
+        let server = TestServer::start();
+        server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri(),
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "notify(if); result = E_NONE;".to_owned(),
+            },
+        });
+
+        let diagnostics = server.next_diagnostics().diagnostics;
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code.as_ref().unwrap(),
+            &NumberOrString::String("invalid-identifier".to_owned())
+        );
+        assert_eq!(
+            diagnostics[0].range,
+            Range::new(Position::new(0, 7), Position::new(0, 9))
+        );
+
         server.stop();
     }
 
