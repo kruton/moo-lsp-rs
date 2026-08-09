@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use crate::line_index::safe_slice;
+use crate::line_index::{LineIndex, safe_slice};
 use lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Position, Range, Uri};
 use std::sync::LazyLock;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
@@ -22,6 +22,7 @@ pub struct SymbolLocation {
 
 pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
     let query = &*LOCALS_QUERY;
+    let line_index = LineIndex::new(text);
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, text.as_bytes());
     let mut symbols = Vec::new();
@@ -41,16 +42,13 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
 
             let start_pos = cap_node.start_position();
             let end_pos = cap_node.end_position();
-            let range = Range {
-                start: Position {
-                    line: start_pos.row as u32,
-                    character: start_pos.column as u32,
-                },
-                end: Position {
-                    line: end_pos.row as u32,
-                    character: end_pos.column as u32,
-                },
-            };
+            let range = line_index.clamp_range(
+                text,
+                start_pos.row,
+                start_pos.column,
+                end_pos.row,
+                end_pos.column,
+            );
 
             let is_definition = match cap_name {
                 "local.definition" => true,
@@ -87,7 +85,17 @@ pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) ->
     let locals = collect_locals(root, text);
     let target_symbol = locals
         .iter()
-        .find(|s| position_in_range(position, s.range))?;
+        .find(|s| position_in_range(position, s.range))
+        .or_else(|| {
+            if position.character == 0 {
+                return None;
+            }
+            let prev = Position {
+                line: position.line,
+                character: position.character - 1,
+            };
+            locals.iter().find(|s| position_in_range(prev, s.range))
+        })?;
 
     // Find the definition of this symbol that occurs in the locals
     let def = locals
@@ -349,7 +357,7 @@ fn position_in_range(pos: Position, range: Range) -> bool {
     if pos.line == range.start.line && pos.character < range.start.character {
         return false;
     }
-    if pos.line == range.end.line && pos.character > range.end.character {
+    if pos.line == range.end.line && pos.character >= range.end.character {
         return false;
     }
     true
@@ -387,6 +395,73 @@ mod tests {
         let def_loc = find_definition(tree.root_node(), code, pos, &uri);
         assert!(def_loc.is_some());
         assert_eq!(def_loc.unwrap().range.start.line, 0);
+    }
+
+    #[test]
+    fn test_position_in_range_end_is_exclusive() {
+        let range = Range {
+            start: Position {
+                line: 1,
+                character: 4,
+            },
+            end: Position {
+                line: 1,
+                character: 5,
+            },
+        };
+
+        assert!(position_in_range(
+            Position {
+                line: 1,
+                character: 4,
+            },
+            range
+        ));
+        assert!(!position_in_range(
+            Position {
+                line: 1,
+                character: 5,
+            },
+            range
+        ));
+    }
+
+    #[test]
+    fn test_find_definition_when_cursor_is_after_symbol() {
+        let code = "x = 1;\ny = x + 2;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+
+        // Position one character after `x` in `y = x + 2;`
+        let pos = Position {
+            line: 1,
+            character: 5,
+        };
+
+        let def_loc = find_definition(tree.root_node(), code, pos, &uri);
+        assert!(def_loc.is_some());
+        let def_loc = def_loc.unwrap();
+        assert_eq!(def_loc.range.start.line, 0);
+        assert_eq!(def_loc.range.start.character, 0);
+    }
+
+    #[test]
+    fn test_find_definition_uses_utf16_columns() {
+        let code = "\"😀\"; x = 1;\n\"😀\"; y = x;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+
+        // The emoji occupies two UTF-16 code units, but four UTF-8 bytes.
+        let pos = Position {
+            line: 1,
+            character: 10,
+        };
+
+        let def_loc = find_definition(tree.root_node(), code, pos, &uri).unwrap();
+        assert_eq!(
+            def_loc.range,
+            Range::new(Position::new(0, 6), Position::new(0, 7))
+        );
     }
 
     #[test]
