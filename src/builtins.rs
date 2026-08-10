@@ -53,10 +53,22 @@ pub struct Builtin {
     pub min: usize,
     pub max: Option<usize>,
     pub args: &'static [MooType],
+    pub returns: Option<MooType>,
+    pub parameter_names: &'static [&'static str],
 }
 
 use MooType::*;
-macro_rules! b { ($n:literal,$min:literal,$max:expr,[$($t:ident),*]) => { Builtin { name:$n, min:$min, max:$max, args:&[$($t),*] } }; }
+macro_rules! b {
+    ($n:literal,$min:literal,$max:expr,[$($t:ident),*]) => {
+        Builtin { name:$n, min:$min, max:$max, args:&[$($t),*], returns:None, parameter_names:&[] }
+    };
+    ($n:literal,$min:literal,$max:expr,[$($t:ident),*] => $r:ident) => {
+        Builtin { name:$n, min:$min, max:$max, args:&[$($t),*], returns:Some($r), parameter_names:&[] }
+    };
+    ($n:literal,$min:literal,$max:expr,[$($t:ident),*] => $r:ident; [$($p:literal),*]) => {
+        Builtin { name:$n, min:$min, max:$max, args:&[$($t),*], returns:Some($r), parameter_names:&[$($p),*] }
+    };
+}
 
 pub static BUILTINS: &[Builtin] = &[
     b!("log_cache_stats", 0, Some(0), []),
@@ -82,7 +94,7 @@ pub static BUILTINS: &[Builtin] = &[
     b!("binary_hash", 1, Some(1), [Str]),
     b!("decode_binary", 1, Some(2), [Str, Any]),
     b!("encode_binary", 0, None, []),
-    b!("length", 1, Some(1), [Any]),
+    b!("length", 1, Some(1), [Any] => Int; ["value"]),
     b!("setadd", 2, Some(2), [List, Any]),
     b!("setremove", 2, Some(2), [List, Any]),
     b!("listappend", 2, Some(3), [List, Any, Int]),
@@ -90,9 +102,9 @@ pub static BUILTINS: &[Builtin] = &[
     b!("listdelete", 2, Some(2), [List, Int]),
     b!("listset", 3, Some(3), [List, Any, Int]),
     b!("equal", 2, Some(2), [Any, Any]),
-    b!("is_member", 2, Some(2), [Any, List]),
-    b!("tostr", 0, None, []),
-    b!("toliteral", 1, Some(1), [Any]),
+    b!("is_member", 2, Some(2), [Any, List] => Int; ["value", "list"]),
+    b!("tostr", 0, None, [] => Str; []),
+    b!("toliteral", 1, Some(1), [Any] => Str; ["value"]),
     b!("match", 2, Some(3), [Str, Str, Any]),
     b!("rmatch", 2, Some(3), [Str, Str, Any]),
     b!("substitute", 2, Some(2), [Str, List]),
@@ -101,23 +113,23 @@ pub static BUILTINS: &[Builtin] = &[
     b!("rindex", 2, Some(3), [Str, Str, Any]),
     b!("strcmp", 2, Some(2), [Str, Str]),
     b!("strsub", 3, Some(4), [Str, Str, Str, Any]),
-    b!("tochar", 1, Some(1), [Any]),
-    b!("charname", 1, Some(1), [Str]),
-    b!("ord", 1, Some(1), [Str]),
+    b!("tochar", 1, Some(1), [Any] => Str; ["value"]),
+    b!("charname", 1, Some(1), [Str] => Str; ["character"]),
+    b!("ord", 1, Some(1), [Str] => Int; ["character"]),
     b!("encode_chars", 2, Some(2), [Any, Str]),
     b!("decode_chars", 2, Some(3), [Str, Str, Any]),
     b!("server_log", 1, Some(2), [Str, Any]),
-    b!("toint", 1, Some(1), [Any]),
-    b!("tonum", 1, Some(1), [Any]),
-    b!("tofloat", 1, Some(1), [Any]),
+    b!("toint", 1, Some(1), [Any] => Int; ["value"]),
+    b!("tonum", 1, Some(1), [Any] => Int; ["value"]),
+    b!("tofloat", 1, Some(1), [Any] => Float; ["value"]),
     b!("min", 1, None, [Numeric]),
     b!("max", 1, None, [Numeric]),
     b!("abs", 1, Some(1), [Numeric]),
-    b!("random", 0, Some(1), [Int]),
-    b!("time", 0, Some(0), []),
-    b!("ftime", 0, Some(0), []),
-    b!("ctime", 0, Some(2), [Int, Str]),
-    b!("floatstr", 2, Some(3), [Float, Int, Any]),
+    b!("random", 0, Some(1), [Int] => Int),
+    b!("time", 0, Some(0), [] => Int),
+    b!("ftime", 0, Some(0), [] => Float),
+    b!("ctime", 0, Some(2), [Int, Str] => Str),
+    b!("floatstr", 2, Some(3), [Float, Int, Any] => Str),
     b!("sqrt", 1, Some(1), [Float]),
     b!("sin", 1, Some(1), [Float]),
     b!("cos", 1, Some(1), [Float]),
@@ -144,9 +156,9 @@ pub static BUILTINS: &[Builtin] = &[
     b!("lgamma", 1, Some(1), [Float]),
     b!("j", 2, Some(2), [Int, Float]),
     b!("y", 2, Some(2), [Int, Float]),
-    b!("toobj", 1, Some(1), [Any]),
-    b!("typeof", 1, Some(1), [Any]),
-    b!("create", 1, Some(2), [Obj, Obj]),
+    b!("toobj", 1, Some(1), [Any] => Obj; ["value"]),
+    b!("typeof", 1, Some(1), [Any] => Int; ["value"]),
+    b!("create", 1, Some(2), [Obj, Obj] => Obj),
     b!("recycle", 1, Some(1), [Obj]),
     b!("object_bytes", 1, Some(1), [Obj]),
     b!("valid", 1, Some(1), [Obj]),
@@ -204,7 +216,7 @@ pub static BUILTINS: &[Builtin] = &[
     b!("verb_code", 2, Some(4), [Obj, Any, Any, Any]),
     b!("set_verb_code", 3, Some(3), [Obj, Any, List]),
     b!("eval", 1, Some(1), [Str]),
-    b!("new_waif", 0, Some(0), []),
+    b!("new_waif", 0, Some(0), [] => Waif),
     b!("xml_parse_tree", 1, Some(1), [Str]),
     b!("xml_parse_document", 1, Some(1), [Str]),
 ];
@@ -217,7 +229,13 @@ impl Builtin {
     pub fn signature(&self) -> String {
         let mut parts = Vec::new();
         for (i, ty) in self.args.iter().enumerate() {
-            let part = format!("arg{}: {}", i + 1, ty.label());
+            let name = self
+                .parameter_names
+                .get(i)
+                .copied()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("arg{}", i + 1));
+            let part = format!("{name}: {}", ty.label());
             parts.push(if i >= self.min {
                 format!("[{part}]")
             } else {
@@ -227,7 +245,11 @@ impl Builtin {
         if self.max.is_none() {
             parts.push("...ANY".to_owned());
         }
-        format!("{}({})", self.name, parts.join(", "))
+        let signature = format!("{}({})", self.name, parts.join(", "));
+        match self.returns {
+            Some(returns) => format!("{signature} -> {}", returns.label()),
+            None => signature,
+        }
     }
 }
 
@@ -304,6 +326,10 @@ fn infer_type(node: Node, root: Node, text: &str, before: usize, depth: usize) -
         }
         "expression" | "arg_item" => {
             infer_type(node.named_child(0)?, root, text, before, depth + 1)
+        }
+        "call_expression" => {
+            let function = node.child_by_field_name("function")?;
+            find(safe_slice(text, function.byte_range()))?.returns
         }
         _ => None,
     }
@@ -506,7 +532,16 @@ pub fn signature_help(root: Node, text: &str, position: Position) -> Option<Sign
         .iter()
         .enumerate()
         .map(|(i, t)| ParameterInformation {
-            label: ParameterLabel::Simple(format!("arg{}: {}", i + 1, t.label())),
+            label: ParameterLabel::Simple(format!(
+                "{}: {}",
+                builtin
+                    .parameter_names
+                    .get(i)
+                    .copied()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("arg{}", i + 1)),
+                t.label()
+            )),
             documentation: None,
         })
         .collect();
@@ -601,5 +636,42 @@ mod tests {
         let help = signature_help(tree.root_node(), text, Position::new(0, 16)).unwrap();
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.signatures[0].parameters.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn builtin_returns_feed_type_inference_and_signatures() {
+        assert_eq!(
+            find("toint").unwrap().signature(),
+            "toint(value: ANY) -> INT"
+        );
+        assert_eq!(
+            find("is_member").unwrap().signature(),
+            "is_member(value: ANY, list: LIST) -> INT"
+        );
+        assert_eq!(find("tostr").unwrap().returns, Some(Str));
+        assert_eq!(find("tofloat").unwrap().returns, Some(Float));
+
+        let text = concat!(
+            "number = toint(\"4\"); notify(player, number); ",
+            "notify(player, tostr(4));"
+        );
+        let tree = parser::parse(text).unwrap();
+        let mut diagnostics = Vec::new();
+        collect_diagnostics(
+            tree.root_node(),
+            &LineIndex::new(text),
+            text,
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code == Some(NumberOrString::String("builtin-argument-type".into()))
+                })
+                .count(),
+            1
+        );
     }
 }
