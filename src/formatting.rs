@@ -24,8 +24,8 @@ enum IndentEvent {
 
 /// Format a verb in the same two-space block style used by `verb_code()`.
 ///
-/// Only leading whitespace is changed. This deliberately leaves expression
-/// spelling, comments, and line endings alone.
+/// Leading whitespace is normalized and empty statements are removed. This
+/// deliberately leaves expression spelling, comments, and line endings alone.
 pub fn format(text: &str) -> Option<String> {
     let tree = parser::parse(text)?;
     if tree.root_node().has_error() {
@@ -35,10 +35,16 @@ pub fn format(text: &str) -> Option<String> {
     let line_count = text.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let mut line_events = vec![Vec::new(); line_count];
     collect_indent_events(tree.root_node(), text.as_bytes(), &mut line_events);
+    let mut empty_statement_ranges = Vec::new();
+    collect_empty_statements(tree.root_node(), &mut empty_statement_ranges);
+    let mut normalized = text.to_owned();
+    for range in empty_statement_ranges.into_iter().rev() {
+        normalized.replace_range(range, "");
+    }
 
     let mut depth = 0usize;
     let mut formatted = String::with_capacity(text.len());
-    for (line_number, line) in text.split_inclusive('\n').enumerate() {
+    for (line_number, line) in normalized.split_inclusive('\n').enumerate() {
         let content = line.strip_suffix('\n').unwrap_or(line);
         let (content, newline) = match content.strip_suffix('\r') {
             Some(content) if line.ends_with("\r\n") => (content, "\r\n"),
@@ -71,6 +77,18 @@ pub fn format(text: &str) -> Option<String> {
     }
 
     Some(formatted)
+}
+
+fn collect_empty_statements(node: Node<'_>, ranges: &mut Vec<std::ops::Range<usize>>) {
+    if node.kind() == "statement" && node.named_child_count() == 0 {
+        ranges.push(node.byte_range());
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_empty_statements(child, ranges);
+    }
 }
 
 fn collect_indent_events(node: Node<'_>, source: &[u8], lines: &mut [Vec<IndentEvent>]) {
@@ -116,6 +134,11 @@ mod tests {
         let input = "if (x)\r\n\t/* endif is not code */\r\n  y   =   \"if\";\r\nendif\r\n";
         let expected = "if (x)\r\n  /* endif is not code */\r\n  y   =   \"if\";\r\nendif\r\n";
         assert_eq!(format(input).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn collapses_repeated_statement_semicolons() {
+        assert_eq!(format("0;;;;;;\n").as_deref(), Some("0;\n"));
     }
 
     #[test]
