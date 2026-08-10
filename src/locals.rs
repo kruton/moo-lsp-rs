@@ -31,7 +31,7 @@ const PREDEFINED_LOCALS: &[&str] = &[
     "argstr", "dobj", "dobjstr", "prepstr", "iobj", "iobjstr",
 ];
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Binding {
     definite: bool,
     definitions: Vec<Range>,
@@ -101,7 +101,21 @@ impl Analyzer<'_> {
             .filter(|binding| !binding.predefined)
             .map(|binding| binding.definitions.clone())
             .unwrap_or_default();
-        self.result.definitions.push((range, definitions));
+        if let Some((_, existing)) = self
+            .result
+            .definitions
+            .iter_mut()
+            .find(|(existing, _)| *existing == range)
+        {
+            for definition in definitions {
+                if !existing.contains(&definition) {
+                    existing.push(definition);
+                }
+            }
+            existing.sort_by_key(|range| (range.start.line, range.start.character));
+        } else {
+            self.result.definitions.push((range, definitions));
+        }
         if !binding.is_some_and(|binding| binding.definite) {
             let message = format!(
                 "Local variable '{}' may be unbound",
@@ -433,27 +447,65 @@ impl Analyzer<'_> {
         if let Some(variable) = children.iter().find(|child| child.kind() == "identifier") {
             self.bind(*variable, &mut body_state);
         }
-        let body = self.analyze_statement_list(
-            children
-                .into_iter()
-                .filter(|child| child.kind() == "statement"),
-            body_state,
-        );
-        body.map_or(state.clone(), |body| join_states(&[state, body]))
+        let statements: Vec<_> = children
+            .into_iter()
+            .filter(|child| child.kind() == "statement")
+            .collect();
+        let recording = self.recording;
+        self.recording = false;
+        let mut head = body_state.clone();
+        loop {
+            let body = self
+                .analyze_statement_list(statements.iter().copied(), head.clone())
+                .unwrap_or_else(|| head.clone());
+            let next = join_states(&[body_state.clone(), body]);
+            if next == head {
+                break;
+            }
+            head = next;
+        }
+        self.recording = recording;
+        let body = self
+            .analyze_statement_list(statements, head.clone())
+            .unwrap_or(head);
+        join_states(&[state, body])
     }
 
     fn analyze_while(&mut self, node: Node, mut state: State) -> State {
         let children = named_children(node);
-        if let Some(condition) = children.iter().find(|child| child.kind() == "expression") {
-            state = self.analyze_expression(*condition, state);
+        let condition = children
+            .iter()
+            .copied()
+            .find(|child| child.kind() == "expression");
+        let statements: Vec<_> = children
+            .into_iter()
+            .filter(|child| child.kind() == "statement")
+            .collect();
+        let entry = state.clone();
+        let recording = self.recording;
+        self.recording = false;
+        let mut head = entry.clone();
+        loop {
+            let condition_state = condition
+                .map(|condition| self.analyze_expression(condition, head.clone()))
+                .unwrap_or_else(|| head.clone());
+            let body = self
+                .analyze_statement_list(statements.iter().copied(), condition_state)
+                .unwrap_or_else(|| head.clone());
+            let next = join_states(&[entry.clone(), body]);
+            if next == head {
+                break;
+            }
+            head = next;
         }
-        let body = self.analyze_statement_list(
-            children
-                .into_iter()
-                .filter(|child| child.kind() == "statement"),
-            state.clone(),
-        );
-        body.map_or(state.clone(), |body| join_states(&[state, body]))
+        self.recording = recording;
+        state = if let Some(condition) = condition {
+            self.analyze_expression(condition, head)
+        } else {
+            head
+        };
+        let _ = self.analyze_statement_list(statements, state.clone());
+        state
     }
 
     fn analyze_fork(&mut self, node: Node, mut state: State) -> State {
@@ -1070,6 +1122,29 @@ mod tests {
         assert_eq!(definitions.len(), 2);
         assert_eq!(definitions[0].range.start, Position::new(1, 2));
         assert_eq!(definitions[1].range.start, Position::new(3, 2));
+    }
+
+    #[test]
+    fn loop_reads_include_loop_carried_definitions() {
+        let code = "x = 5;\nmessage = 1;\nwhile (x > 0)\n  x = x - 1;\n  message = message + 1;\nendwhile\nreturn message;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+
+        let x_definitions = find_definitions(tree.root_node(), code, Position::new(3, 6), &uri);
+        assert_eq!(x_definitions.len(), 2);
+        assert_eq!(x_definitions[0].range.start, Position::new(0, 0));
+        assert_eq!(x_definitions[1].range.start, Position::new(3, 2));
+
+        let message_definitions =
+            find_definitions(tree.root_node(), code, Position::new(4, 12), &uri);
+        assert_eq!(message_definitions.len(), 2);
+        assert_eq!(message_definitions[0].range.start, Position::new(1, 0));
+        assert_eq!(message_definitions[1].range.start, Position::new(4, 2));
+        assert!(
+            analyze_locals(tree.root_node(), code)
+                .diagnostics
+                .is_empty()
+        );
     }
 
     #[test]
