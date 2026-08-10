@@ -27,7 +27,7 @@ fn test_invalid_code() {
 
 #[test]
 fn test_keyword_used_as_identifier_diagnostic() {
-    let code = "notify(if); result = E_NONE;";
+    let code = "notify(if, \"hi\"); result = E_NONE;";
     let tree = parser::parse(code).unwrap();
     assert!(!tree.root_node().has_error());
 
@@ -200,11 +200,11 @@ fn test_collect_folding_ranges() {
 
 #[test]
 fn test_collect_document_symbols() {
-    let code = "a = 1;\nnotify(player);\nitem:run();\n$announce();\n";
+    let code = "a = 1;\nnotify(player, \"hi\");\nitem:run();\n$announce();\n";
     let tree = parser::parse(code).unwrap();
     let symbols = parser::collect_document_symbols(tree.root_node(), code);
     assert!(symbols.iter().any(|symbol| {
-        symbol.name == "notify(player)" && symbol.kind == lsp_types::SymbolKind::FUNCTION
+        symbol.name == "notify(player, \"hi\")" && symbol.kind == lsp_types::SymbolKind::FUNCTION
     }));
     assert!(symbols.iter().any(|symbol| {
         symbol.name == "item:run()" && symbol.kind == lsp_types::SymbolKind::METHOD
@@ -296,7 +296,7 @@ fn test_all_features() {
 
 #[test]
 fn test_unbalanced_paren_and_missing_semicolon_diagnostic() {
-    let code = "notify(player";
+    let code = "notify(player, \"hi\"";
     let tree = parser::parse(code).unwrap();
     let line_index = LineIndex::new(code);
     let mut diagnostics = Vec::new();

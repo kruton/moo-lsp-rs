@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::{formatting, line_index::LineIndex, locals, parser, semantic_tokens};
+use crate::{builtins, formatting, line_index::LineIndex, locals, parser, semantic_tokens};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
@@ -13,17 +13,19 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-    GotoDefinition, Request as LspRequest, SemanticTokensFullRequest,
+    GotoDefinition, HoverRequest, Request as LspRequest, SemanticTokensFullRequest,
+    SignatureHelpRequest,
 };
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, LogMessageParams, MessageType, OneOf, Position,
-    PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Uri,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    LogMessageParams, MessageType, OneOf, Position, PublishDiagnosticsParams, Range,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, Uri,
 };
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -157,6 +159,12 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+            retrigger_characters: Some(vec![",".to_owned()]),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
@@ -282,6 +290,41 @@ impl Server {
                     self.document_highlight(&params),
                 )));
             }
+            HoverRequest::METHOD => {
+                let params = match serde_json::from_value::<HoverParams>(request.params.clone()) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        output.push(error_response(
+                            request.id,
+                            ErrorCode::InvalidParams,
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.hover(&params),
+                )));
+            }
+            SignatureHelpRequest::METHOD => {
+                let params =
+                    match serde_json::from_value::<SignatureHelpParams>(request.params.clone()) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            output.push(error_response(
+                                request.id,
+                                ErrorCode::InvalidParams,
+                                error.to_string(),
+                            ));
+                            return;
+                        }
+                    };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.signature_help(&params),
+                )));
+            }
             _ => output.push(error_response(
                 request.id,
                 ErrorCode::MethodNotFound,
@@ -381,6 +424,19 @@ impl Server {
                 };
                 let result = self.document_highlight(&params);
                 send_ok(connection, request.id, result)?;
+            }
+            HoverRequest::METHOD => {
+                let Some(params) = request_params::<HoverParams>(connection, &request)? else {
+                    return Ok(());
+                };
+                send_ok(connection, request.id, self.hover(&params))?;
+            }
+            SignatureHelpRequest::METHOD => {
+                let Some(params) = request_params::<SignatureHelpParams>(connection, &request)?
+                else {
+                    return Ok(());
+                };
+                send_ok(connection, request.id, self.signature_help(&params))?;
             }
             _ => {
                 send_error(
@@ -484,6 +540,20 @@ impl Server {
             text,
             params.text_document_position_params.position,
         ))
+    }
+
+    fn hover(&self, params: &HoverParams) -> Option<Hover> {
+        let position = &params.text_document_position_params;
+        let text = self.documents.get(&position.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        builtins::hover(tree.root_node(), text, position.position)
+    }
+
+    fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {
+        let position = &params.text_document_position_params;
+        let text = self.documents.get(&position.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        builtins::signature_help(tree.root_node(), text, position.position)
     }
 }
 
@@ -622,7 +692,8 @@ mod tests {
     };
     use lsp_types::request::{
         DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-        GotoDefinition, Request as _, SemanticTokensFullRequest, Shutdown,
+        GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest, Shutdown,
+        SignatureHelpRequest,
     };
     use lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
@@ -685,6 +756,11 @@ mod tests {
             assert_eq!(result["capabilities"]["textDocumentSync"], 1);
             assert_eq!(result["capabilities"]["documentFormattingProvider"], true);
             assert!(result["capabilities"]["semanticTokensProvider"].is_object());
+            assert_eq!(result["capabilities"]["hoverProvider"], true);
+            assert_eq!(
+                result["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+                serde_json::json!(["(", ","])
+            );
             test_server.notify::<Initialized>(InitializedParams {});
             test_server
         }
@@ -768,7 +844,7 @@ mod tests {
                 uri: uri(),
                 language_id: "lambdamoo".to_owned(),
                 version: 1,
-                text: "if (x)\nnotify(player);\nendif\n".to_owned(),
+                text: "if (x)\nnotify(player, \"hi\");\nendif\n".to_owned(),
             },
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
@@ -794,7 +870,7 @@ mod tests {
             content_changes: vec![TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
-                text: "if (x)\nnotify(player);\nendif\n".to_owned(),
+                text: "if (x)\nnotify(player, \"hi\");\nendif\n".to_owned(),
             }],
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
@@ -811,6 +887,34 @@ mod tests {
             tokens.response_result.unwrap()["data"]
                 .as_array()
                 .is_some_and(|v| !v.is_empty())
+        );
+
+        let hover = server.request(
+            HoverRequest::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "position": { "line": 1, "character": 2 }
+            }),
+        );
+        assert!(
+            hover.response_result.unwrap()["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("notify(arg1: OBJ, arg2: STR"))
+        );
+
+        let signature = server.request(
+            SignatureHelpRequest::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "position": { "line": 1, "character": 17 }
+            }),
+        );
+        let signature = signature.response_result.unwrap();
+        assert_eq!(signature["activeParameter"], 1);
+        assert!(
+            signature["signatures"][0]["label"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("notify("))
         );
 
         let formatting = server.request(
@@ -905,7 +1009,7 @@ mod tests {
                 uri: uri(),
                 language_id: "lambdamoo".to_owned(),
                 version: 1,
-                text: "notify(if); result = E_NONE;".to_owned(),
+                text: "notify(if, \"hi\"); result = E_NONE;".to_owned(),
             },
         });
 
