@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+pub mod builtins;
 pub mod formatting;
 pub mod line_index;
 pub mod locals;

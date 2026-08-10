@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-use crate::line_index::{LineIndex, safe_slice};
+use crate::{
+    builtins,
+    line_index::{LineIndex, safe_slice},
+};
 use lsp_types::*;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -372,6 +375,7 @@ pub fn collect_diagnostics(
 
     // Also check for orphan control statements parsed as top-level identifiers
     collect_orphan_keywords(node, line_index, text, diagnostics);
+    builtins::collect_diagnostics(node, line_index, text, diagnostics);
 }
 
 fn process_error_node(

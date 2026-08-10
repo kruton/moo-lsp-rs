@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_find_highlights_delimiters() {
-        let code = "notify(player);\n";
+        let code = "notify(player, \"hi\");\n";
         let tree = parser::parse(code).unwrap();
         let pos_open = Position {
             line: 0,
@@ -622,7 +622,7 @@ mod tests {
         let highlights = find_highlights(tree.root_node(), code, pos_open);
         assert_eq!(highlights.len(), 2);
         assert_eq!(highlights[0].range.start.character, 6);
-        assert_eq!(highlights[1].range.start.character, 13);
+        assert_eq!(highlights[1].range.start.character, 19);
     }
 
     #[test]
