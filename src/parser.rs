@@ -73,7 +73,7 @@ pub fn collect_document_symbols(node: Node, text: &str) -> Vec<DocumentSymbol> {
 
             let (name, kind) = match cap_node.kind() {
                 "call_expression" => (raw_text.to_string(), SymbolKind::FUNCTION),
-                "verb_call" => (raw_text.to_string(), SymbolKind::METHOD),
+                "verb_call" | "system_verb_call" => (raw_text.to_string(), SymbolKind::METHOD),
                 "prop_access" => (raw_text.to_string(), SymbolKind::PROPERTY),
                 "assignment" => (raw_text.to_string(), SymbolKind::VARIABLE),
                 _ => (raw_text.to_string(), SymbolKind::VARIABLE),

@@ -200,10 +200,18 @@ fn test_collect_folding_ranges() {
 
 #[test]
 fn test_collect_document_symbols() {
-    let code = "a = 1;\nnotify(player);\nitem:run();\n";
+    let code = "a = 1;\nnotify(player);\nitem:run();\n$announce();\n";
     let tree = parser::parse(code).unwrap();
     let symbols = parser::collect_document_symbols(tree.root_node(), code);
-    assert!(!symbols.is_empty());
+    assert!(symbols.iter().any(|symbol| {
+        symbol.name == "notify(player)" && symbol.kind == lsp_types::SymbolKind::FUNCTION
+    }));
+    assert!(symbols.iter().any(|symbol| {
+        symbol.name == "item:run()" && symbol.kind == lsp_types::SymbolKind::METHOD
+    }));
+    assert!(symbols.iter().any(|symbol| {
+        symbol.name == "$announce()" && symbol.kind == lsp_types::SymbolKind::METHOD
+    }));
 }
 
 #[test]
