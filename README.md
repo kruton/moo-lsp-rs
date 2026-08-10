@@ -6,6 +6,104 @@ to assist developers in writing code. It features the ability to pinpoint errors
 at the character granularity. Features include syntax highlighting and code
 formatting.
 
+## Editor setup
+
+Install a release binary or build the server with `cargo build --release`, then
+make sure `moo-lsp-rs` is available on your `PATH`.
+
+### Vim with YouCompleteMe
+
+First, teach Vim to recognize LambdaMOO source files. Add the following to
+`~/.vim/ftdetect/moo.vim`:
+
+```vim
+augroup moo_filetype
+  autocmd!
+  autocmd BufRead,BufNewFile *.moo setfiletype moo
+augroup END
+```
+
+Then add the server to your YouCompleteMe configuration, for example in your
+`.vimrc`:
+
+```vim
+let g:ycm_language_server = get(g:, 'ycm_language_server', []) + [
+    \ {
+    \   'name': 'moo-lsp-rs',
+    \   'cmdline': ['moo-lsp-rs'],
+    \   'filetypes': ['moo'],
+    \   'project_root_files': ['.git'],
+    \ },
+    \ ]
+
+augroup moo_ycm
+  autocmd!
+  autocmd FileType moo let b:ycm_enable_semantic_highlighting = 1
+augroup END
+```
+
+Restart Vim and open a `.moo` file. Run `:YcmDebugInfo` if you need to confirm
+that YouCompleteMe found and started the server.
+
+### Vim with vim-lsp
+
+Install [vim-lsp](https://github.com/prabirshrestha/vim-lsp), configure the
+`moo` filetype as shown above, and register the server in your `.vimrc`:
+
+```vim
+if executable('moo-lsp-rs')
+  augroup moo_lsp
+    autocmd!
+    autocmd User lsp_setup call lsp#register_server({
+        \ 'name': 'moo-lsp-rs',
+        \ 'cmd': {server_info->['moo-lsp-rs']},
+        \ 'allowlist': ['moo'],
+        \ })
+  augroup END
+endif
+```
+
+Open a `.moo` file and use commands such as `:LspDefinition`, `:LspHover`, and
+`:LspDocumentFormat`. See `:help vim-lsp` for available commands and optional
+key mappings.
+
+`moo-lsp-rs` does not currently advertise semantic completion, so vim-lsp will
+not offer LSP completion candidates for LambdaMOO code.
+
+### Emacs with Eglot
+
+Emacs 29 and later include Eglot. Add this configuration to your init file; the
+small derived mode can be omitted if you already use a LambdaMOO major mode:
+
+```elisp
+(require 'eglot)
+
+(define-derived-mode moo-mode prog-mode "MOO"
+  "Major mode for editing LambdaMOO source files.")
+
+(add-to-list 'auto-mode-alist '("\\.moo\\'" . moo-mode))
+(add-to-list 'eglot-server-programs '(moo-mode . ("moo-lsp-rs")))
+(add-hook 'moo-mode-hook #'eglot-ensure)
+```
+
+To use newer Eglot features than those provided by the version bundled with
+Emacs, install the current Eglot release from GNU ELPA with
+`M-x package-install RET eglot RET`. For example, replace the final `add-hook`
+above with the following to enable the semantic tokens provided
+by `moo-lsp-rs`:
+
+```elisp
+(defun moo-eglot-setup ()
+  (eglot-ensure)
+  (eglot-semantic-tokens-mode 1))
+
+(add-hook 'moo-mode-hook #'moo-eglot-setup)
+```
+
+After evaluating the configuration, open a `.moo` file. Use
+`M-x eglot-events-buffer` to inspect the connection if the server does not
+start.
+
 ## Release binaries
 
 Version tags matching `vX.Y.Z` build language-server binaries for the VS Code
@@ -75,6 +173,12 @@ make wasm WASI_SDK_PATH=/path/to/wasi-sdk
 The output is written to `dist/web/moo-lsp-rs.wasm` for VS Code and
 `dist/browser/` for browser clients. To build only one bundle, use
 `make wasm-vscode WASI_SDK_PATH=/path/to/wasi-sdk` or `make wasm-browser`.
+
+## Related projects
+
+- [vscode-lambdamoo](https://github.com/kruton/vscode-lambdamoo) - Plugin using this LSP in VS Code (and clones)
+- [codemirror-lambdamoo](https://github.com/kruton/codemirror-lambdamoo) - Language extension support for CodeMirror using this LSP
+- [tree-sitter-lambdamoo](http://github.com/kruton/tree-sitter-lambdamoo) - Tree-sitter parser language support for LambdaMOO used in this LSP
 
 ## License
 Licensed under the MIT License. See LICENSE or file headers for details.
