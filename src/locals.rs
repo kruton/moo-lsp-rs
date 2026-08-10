@@ -3,8 +3,11 @@
 // SPDX-License-Identifier: MIT
 
 use crate::line_index::{LineIndex, safe_slice};
-use lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Position, Range, Uri};
-use std::sync::LazyLock;
+use lsp_types::{
+    Diagnostic, DiagnosticSeverity, DocumentHighlight, DocumentHighlightKind, Location,
+    NumberOrString, Position, Range, Uri,
+};
+use std::{collections::HashMap, sync::LazyLock};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 static LOCALS_QUERY: LazyLock<Query> = LazyLock::new(|| {
@@ -21,6 +24,558 @@ pub struct SymbolLocation {
     pub name: String,
     pub is_definition: bool,
     pub range: Range,
+}
+
+const PREDEFINED_LOCALS: &[&str] = &[
+    "int", "float", "obj", "str", "list", "err", "num", "player", "this", "caller", "verb", "args",
+    "argstr", "dobj", "dobjstr", "prepstr", "iobj", "iobjstr",
+];
+
+#[derive(Clone, Default)]
+struct Binding {
+    definite: bool,
+    definitions: Vec<Range>,
+    predefined: bool,
+}
+
+type State = HashMap<String, Binding>;
+
+#[derive(Default)]
+pub struct LocalAnalysis {
+    pub diagnostics: Vec<Diagnostic>,
+    definitions: Vec<(Range, Vec<Range>)>,
+}
+
+struct Analyzer<'a> {
+    text: &'a str,
+    line_index: LineIndex,
+    result: LocalAnalysis,
+    recording: bool,
+}
+
+pub fn analyze_locals(root: Node, text: &str) -> LocalAnalysis {
+    let mut state = State::new();
+    for name in PREDEFINED_LOCALS {
+        state.insert(
+            (*name).to_owned(),
+            Binding {
+                definite: true,
+                definitions: Vec::new(),
+                predefined: true,
+            },
+        );
+    }
+    let mut analyzer = Analyzer {
+        text,
+        line_index: LineIndex::new(text),
+        result: LocalAnalysis::default(),
+        recording: true,
+    };
+    analyzer.analyze_block(root, state);
+    analyzer.result
+}
+
+impl Analyzer<'_> {
+    fn range(&self, node: Node) -> Range {
+        self.line_index.clamp_range(
+            self.text,
+            node.start_position().row,
+            node.start_position().column,
+            node.end_position().row,
+            node.end_position().column,
+        )
+    }
+
+    fn name(&self, node: Node) -> String {
+        safe_slice(self.text, node.byte_range()).to_ascii_lowercase()
+    }
+
+    fn record_reference(&mut self, node: Node, state: &State) {
+        if !self.recording || node.kind() != "identifier" {
+            return;
+        }
+        let name = self.name(node);
+        let binding = state.get(&name);
+        let range = self.range(node);
+        let definitions = binding
+            .filter(|binding| !binding.predefined)
+            .map(|binding| binding.definitions.clone())
+            .unwrap_or_default();
+        self.result.definitions.push((range, definitions));
+        if !binding.is_some_and(|binding| binding.definite) {
+            let message = format!(
+                "Local variable '{}' may be unbound",
+                safe_slice(self.text, node.byte_range())
+            );
+            if !self
+                .result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.range == range && diagnostic.message == message)
+            {
+                self.result.diagnostics.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: Some(NumberOrString::String("unbound-local".to_owned())),
+                    code_description: None,
+                    source: Some("moo-lsp-rs".to_owned()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+    }
+
+    fn bind(&mut self, node: Node, state: &mut State) {
+        if node.kind() != "identifier" {
+            return;
+        }
+        let name = self.name(node);
+        let range = self.range(node);
+        let predefined = state.get(&name).is_some_and(|binding| binding.predefined);
+        state.insert(
+            name,
+            Binding {
+                definite: true,
+                definitions: if predefined { Vec::new() } else { vec![range] },
+                predefined,
+            },
+        );
+        if self.recording {
+            self.result
+                .definitions
+                .push((range, if predefined { Vec::new() } else { vec![range] }));
+        }
+    }
+
+    fn maybe_bind(&mut self, node: Node, state: &mut State) {
+        let name = self.name(node);
+        let range = self.range(node);
+        let binding = state.entry(name).or_default();
+        if !binding.predefined && !binding.definitions.contains(&range) {
+            binding.definitions.push(range);
+        }
+        if self.recording {
+            self.result.definitions.push((
+                range,
+                if binding.predefined {
+                    Vec::new()
+                } else {
+                    vec![range]
+                },
+            ));
+        }
+    }
+
+    fn analyze_block(&mut self, node: Node, mut state: State) -> Option<State> {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "statement" {
+                continue;
+            }
+            state = self.analyze_statement(child, state)?;
+        }
+        Some(state)
+    }
+
+    fn analyze_statement(&mut self, node: Node, state: State) -> Option<State> {
+        if node.is_missing() || node.kind() == "ERROR" || node.has_error() {
+            return Some(state);
+        }
+        let inner = if node.kind() == "statement" {
+            node.named_child(0).unwrap_or(node)
+        } else {
+            node
+        };
+        match inner.kind() {
+            "if_statement" => self.analyze_if(inner, state),
+            "for_statement" => Some(self.analyze_for(inner, state)),
+            "while_statement" => Some(self.analyze_while(inner, state)),
+            "fork_statement" => Some(self.analyze_fork(inner, state)),
+            "try_statement" => self.analyze_try(inner, state),
+            "return_statement" => {
+                let state = self.analyze_named_expressions(inner, state);
+                let _ = state;
+                None
+            }
+            "break_statement" | "continue_statement" => None,
+            _ => Some(self.analyze_expression(inner, state)),
+        }
+    }
+
+    fn analyze_expression(&mut self, node: Node, mut state: State) -> State {
+        if node.is_missing() || node.kind() == "ERROR" || node.has_error() {
+            return state;
+        }
+        match node.kind() {
+            "identifier" => self.record_reference(node, &state),
+            "assignment" => {
+                if let (Some(lhs), Some(rhs)) = (node.named_child(0), node.named_child(1)) {
+                    state = self.analyze_expression(rhs, state);
+                    if lhs.kind() == "identifier" {
+                        self.bind(lhs, &mut state);
+                    } else {
+                        state = self.analyze_expression(lhs, state);
+                    }
+                }
+            }
+            "scattering_assignment" => state = self.analyze_scatter(node, state),
+            "call_expression" | "system_verb_call" => {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    state = self.analyze_expression(args, state);
+                }
+            }
+            "verb_call" => {
+                if let Some(receiver) = node.child_by_field_name("receiver") {
+                    state = self.analyze_expression(receiver, state);
+                }
+                if let Some(verb) = node.child_by_field_name("verb")
+                    && verb.kind() == "expression"
+                {
+                    state = self.analyze_expression(verb, state);
+                }
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    state = self.analyze_expression(args, state);
+                }
+            }
+            "prop_access" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() != "identifier" {
+                        state = self.analyze_expression(child, state);
+                    }
+                }
+            }
+            "binary_expression" => {
+                let children = named_children(node);
+                if let Some(first) = children.first() {
+                    state = self.analyze_expression(*first, state);
+                }
+                if let Some(second) = children.get(1) {
+                    let rhs = self.analyze_expression(*second, state.clone());
+                    let short_circuit = node
+                        .children(&mut node.walk())
+                        .any(|child| matches!(child.kind(), "&&" | "||"));
+                    state = if short_circuit {
+                        join_states(&[state, rhs])
+                    } else {
+                        rhs
+                    };
+                }
+            }
+            "ternary_expression" => {
+                let children = named_children(node);
+                if let Some(condition) = children.first() {
+                    state = self.analyze_expression(*condition, state);
+                }
+                if children.len() >= 3 {
+                    let yes = self.analyze_expression(children[1], state.clone());
+                    let no = self.analyze_expression(children[2], state.clone());
+                    state = join_states(&[yes, no]);
+                }
+            }
+            "catch_expression" => {
+                let children = named_children(node);
+                if let Some(protected) = children.first() {
+                    let success = self.analyze_expression(*protected, state.clone());
+                    let mut failure = state.clone();
+                    if let Some(codes) = children.iter().find(|child| child.kind() == "codes") {
+                        failure = self.analyze_expression(*codes, failure);
+                    }
+                    if let Some(fallback) = children
+                        .iter()
+                        .rev()
+                        .find(|child| child.kind() == "expression" && **child != *protected)
+                    {
+                        failure = self.analyze_expression(*fallback, failure);
+                        state = join_states(&[success, failure]);
+                    } else {
+                        state = success;
+                    }
+                }
+            }
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    state = self.analyze_expression(child, state);
+                }
+            }
+        }
+        state
+    }
+
+    fn analyze_named_expressions(&mut self, node: Node, mut state: State) -> State {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "expression" {
+                state = self.analyze_expression(child, state);
+            }
+        }
+        state
+    }
+
+    fn analyze_scatter(&mut self, node: Node, mut state: State) -> State {
+        let Some(list) = node.named_child(0) else {
+            return state;
+        };
+        let Some(rhs) = node.named_child(1) else {
+            return state;
+        };
+        state = self.analyze_expression(rhs, state);
+        let mut deferred = Vec::new();
+        let mut cursor = list.walk();
+        let children: Vec<_> = list.children(&mut cursor).collect();
+        for item in children.split(|child| child.kind() == ",") {
+            let Some(target) = item
+                .iter()
+                .copied()
+                .find(|child| child.kind() == "identifier")
+            else {
+                continue;
+            };
+            let raw = item
+                .first()
+                .zip(item.last())
+                .map(|(first, last)| safe_slice(self.text, first.start_byte()..last.end_byte()))
+                .unwrap_or_default()
+                .trim_start();
+            let default = item
+                .iter()
+                .copied()
+                .find(|child| child.kind() == "expression");
+            if raw.starts_with('?') && default.is_none() {
+                self.maybe_bind(target, &mut state);
+            } else if let Some(default) = default {
+                deferred.push((target, default));
+            } else {
+                self.bind(target, &mut state);
+            }
+        }
+        for (target, default) in deferred {
+            state = self.analyze_expression(default, state);
+            self.bind(target, &mut state);
+        }
+        state
+    }
+
+    fn analyze_if(&mut self, node: Node, mut state: State) -> Option<State> {
+        let children = named_children(node);
+        let Some(condition) = children.iter().find(|child| child.kind() == "expression") else {
+            return Some(state);
+        };
+        state = self.analyze_expression(*condition, state);
+        let mut branches = Vec::new();
+        let direct = children
+            .iter()
+            .copied()
+            .filter(|child| child.kind() == "statement");
+        branches.push(self.analyze_statement_list(direct, state.clone()));
+        let mut has_else = false;
+        let mut false_state = state.clone();
+        for clause in children {
+            match clause.kind() {
+                "elseif_clause" => {
+                    let clause_children = named_children(clause);
+                    if let Some(condition) = clause_children
+                        .iter()
+                        .find(|child| child.kind() == "expression")
+                    {
+                        false_state = self.analyze_expression(*condition, false_state);
+                    }
+                    branches.push(
+                        self.analyze_statement_list(
+                            clause_children
+                                .into_iter()
+                                .filter(|child| child.kind() == "statement"),
+                            false_state.clone(),
+                        ),
+                    );
+                }
+                "else_clause" => {
+                    has_else = true;
+                    branches.push(
+                        self.analyze_statement_list(
+                            named_children(clause)
+                                .into_iter()
+                                .filter(|child| child.kind() == "statement"),
+                            false_state.clone(),
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if !has_else {
+            branches.push(Some(false_state));
+        }
+        join_reachable(branches)
+    }
+
+    fn analyze_statement_list<'tree>(
+        &mut self,
+        statements: impl IntoIterator<Item = Node<'tree>>,
+        mut state: State,
+    ) -> Option<State> {
+        for statement in statements {
+            state = self.analyze_statement(statement, state)?;
+        }
+        Some(state)
+    }
+
+    fn analyze_for(&mut self, node: Node, mut state: State) -> State {
+        let children = named_children(node);
+        for expression in children.iter().filter(|child| child.kind() == "expression") {
+            state = self.analyze_expression(*expression, state);
+        }
+        let mut body_state = state.clone();
+        if let Some(variable) = children.iter().find(|child| child.kind() == "identifier") {
+            self.bind(*variable, &mut body_state);
+        }
+        let body = self.analyze_statement_list(
+            children
+                .into_iter()
+                .filter(|child| child.kind() == "statement"),
+            body_state,
+        );
+        body.map_or(state.clone(), |body| join_states(&[state, body]))
+    }
+
+    fn analyze_while(&mut self, node: Node, mut state: State) -> State {
+        let children = named_children(node);
+        if let Some(condition) = children.iter().find(|child| child.kind() == "expression") {
+            state = self.analyze_expression(*condition, state);
+        }
+        let body = self.analyze_statement_list(
+            children
+                .into_iter()
+                .filter(|child| child.kind() == "statement"),
+            state.clone(),
+        );
+        body.map_or(state.clone(), |body| join_states(&[state, body]))
+    }
+
+    fn analyze_fork(&mut self, node: Node, mut state: State) -> State {
+        let children = named_children(node);
+        if let Some(delay) = children.iter().find(|child| child.kind() == "expression") {
+            state = self.analyze_expression(*delay, state);
+        }
+        if let Some(variable) = children.iter().find(|child| child.kind() == "identifier") {
+            self.bind(*variable, &mut state);
+        }
+        let _ = self.analyze_statement_list(
+            children
+                .into_iter()
+                .filter(|child| child.kind() == "statement"),
+            state.clone(),
+        );
+        state
+    }
+
+    fn analyze_try(&mut self, node: Node, state: State) -> Option<State> {
+        let children = named_children(node);
+        let direct: Vec<_> = children
+            .iter()
+            .copied()
+            .filter(|child| child.kind() == "statement")
+            .collect();
+        let clauses: Vec<_> = children
+            .iter()
+            .copied()
+            .filter(|child| child.kind() == "except_clause")
+            .collect();
+        if !clauses.is_empty() {
+            let normal = self.analyze_statement_list(direct, state.clone());
+            let mut paths = vec![normal];
+            for clause in clauses {
+                let clause_children = named_children(clause);
+                let mut handler = state.clone();
+                if let Some(variable) = clause_children
+                    .iter()
+                    .find(|child| child.kind() == "identifier")
+                {
+                    self.bind(*variable, &mut handler);
+                }
+                for codes in clause_children
+                    .iter()
+                    .filter(|child| child.kind() == "codes")
+                {
+                    handler = self.analyze_expression(*codes, handler);
+                }
+                paths.push(
+                    self.analyze_statement_list(
+                        clause_children
+                            .into_iter()
+                            .filter(|child| child.kind() == "statement"),
+                        handler,
+                    ),
+                );
+            }
+            return join_reachable(paths);
+        }
+
+        let mut before_finally = Vec::new();
+        let mut after_finally = Vec::new();
+        let mut seen_finally = false;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "finally" {
+                seen_finally = true;
+            } else if child.kind() == "statement" {
+                if seen_finally {
+                    after_finally.push(child)
+                } else {
+                    before_finally.push(child)
+                }
+            }
+        }
+        let _ = self.analyze_statement_list(after_finally.iter().copied(), state.clone());
+        let normal = self.analyze_statement_list(before_finally, state.clone())?;
+        let recording = self.recording;
+        self.recording = false;
+        let output = self.analyze_statement_list(after_finally, normal);
+        self.recording = recording;
+        output
+    }
+}
+
+fn named_children(node: Node) -> Vec<Node> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
+fn join_reachable(states: Vec<Option<State>>) -> Option<State> {
+    let states: Vec<_> = states.into_iter().flatten().collect();
+    (!states.is_empty()).then(|| join_states(&states))
+}
+
+fn join_states(states: &[State]) -> State {
+    let mut result = State::new();
+    for state in states {
+        for (name, binding) in state {
+            let joined = result.entry(name.clone()).or_insert_with(|| Binding {
+                definite: true,
+                definitions: Vec::new(),
+                predefined: binding.predefined,
+            });
+            joined.predefined |= binding.predefined;
+            for definition in &binding.definitions {
+                if !joined.definitions.contains(definition) {
+                    joined.definitions.push(*definition);
+                }
+            }
+        }
+    }
+    for (name, binding) in &mut result {
+        binding.definite = states
+            .iter()
+            .all(|state| state.get(name).is_some_and(|candidate| candidate.definite));
+        binding
+            .definitions
+            .sort_by_key(|range| (range.start.line, range.start.character));
+    }
+    result
 }
 
 pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
@@ -122,96 +677,41 @@ fn collect_scatter_definitions(
     }
 }
 
-pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) -> Option<Location> {
-    let locals = collect_locals(root, text);
-    let target_symbol = locals
+pub fn find_definitions(root: Node, text: &str, position: Position, uri: &Uri) -> Vec<Location> {
+    let analysis = analyze_locals(root, text);
+    let ranges = analysis
+        .definitions
         .iter()
-        .find(|s| position_in_range(position, s.range))
+        .find(|(range, _)| position_in_range(position, *range))
         .or_else(|| {
-            if position.character == 0 {
-                return None;
-            }
-            let prev = Position {
-                line: position.line,
-                character: position.character - 1,
-            };
-            locals.iter().find(|s| position_in_range(prev, s.range))
-        })?;
-
-    let target_offset = position_to_byte_offset(text, target_symbol.range.start)?;
-
-    // Assignments evaluate their right-hand side before updating their target. Exclude
-    // assignment targets that enclose this reference, then use the most recent earlier
-    // definition.
-    let def = locals
-        .iter()
-        .filter(|s| {
-            s.is_definition
-                && s.name == target_symbol.name
-                && position_before_or_equal(s.range.end, target_symbol.range.start)
-                && !is_enclosing_assignment_target(root, text, s.range, target_offset)
+            (position.character > 0)
+                .then(|| Position {
+                    line: position.line,
+                    character: position.character - 1,
+                })
+                .and_then(|previous| {
+                    analysis
+                        .definitions
+                        .iter()
+                        .find(|(range, _)| position_in_range(previous, *range))
+                })
         })
-        .max_by_key(|s| (s.range.start.line, s.range.start.character))?;
-    Some(Location {
-        uri: uri.clone(),
-        range: def.range,
-    })
+        .map(|(_, definitions)| definitions)
+        .cloned()
+        .unwrap_or_default();
+    ranges
+        .into_iter()
+        .map(|range| Location {
+            uri: uri.clone(),
+            range,
+        })
+        .collect()
 }
 
-fn is_enclosing_assignment_target(
-    root: Node,
-    text: &str,
-    definition_range: Range,
-    target_offset: usize,
-) -> bool {
-    let Some(definition_offset) = position_to_byte_offset(text, definition_range.start) else {
-        return false;
-    };
-    let Some(mut node) = root.descendant_for_byte_range(definition_offset, definition_offset)
-    else {
-        return false;
-    };
-
-    loop {
-        if node.kind() == "assignment"
-            && node.named_child(0).is_some_and(|lhs| {
-                lhs.start_byte() <= definition_offset
-                    && definition_offset < lhs.end_byte()
-                    && lhs.end_byte() <= target_offset
-                    && target_offset < node.end_byte()
-            })
-        {
-            return true;
-        }
-        let Some(parent) = node.parent() else {
-            return false;
-        };
-        node = parent;
-    }
-}
-
-fn position_to_byte_offset(text: &str, position: Position) -> Option<usize> {
-    let line_start = text
-        .split_inclusive('\n')
-        .take(position.line as usize)
-        .map(str::len)
-        .sum::<usize>();
-    let line = text.get(line_start..)?.split('\n').next()?;
-    let mut utf16_col = 0;
-    for (byte_col, ch) in line.char_indices() {
-        if utf16_col == position.character as usize {
-            return Some(line_start + byte_col);
-        }
-        utf16_col += ch.len_utf16();
-        if utf16_col > position.character as usize {
-            return None;
-        }
-    }
-    (utf16_col == position.character as usize).then_some(line_start + line.len())
-}
-
-fn position_before_or_equal(left: Position, right: Position) -> bool {
-    (left.line, left.character) <= (right.line, right.character)
+pub fn find_definition(root: Node, text: &str, position: Position, uri: &Uri) -> Option<Location> {
+    find_definitions(root, text, position, uri)
+        .into_iter()
+        .next()
 }
 
 pub fn find_highlights(root: Node, text: &str, position: Position) -> Vec<DocumentHighlight> {
@@ -487,6 +987,89 @@ mod tests {
             .filter(|s| s.name == "x" && s.is_definition)
             .collect();
         assert_eq!(x_defs.len(), 1);
+    }
+
+    fn unbound_names(code: &str) -> Vec<String> {
+        let tree = parser::parse(code).unwrap();
+        analyze_locals(tree.root_node(), code)
+            .diagnostics
+            .into_iter()
+            .filter_map(|diagnostic| {
+                diagnostic
+                    .message
+                    .strip_prefix("Local variable '")
+                    .and_then(|message| message.strip_suffix("' may be unbound"))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reports_unbound_reads_and_respects_evaluation_order() {
+        assert_eq!(unbound_names("return missing;\n"), ["missing"]);
+        assert!(unbound_names("value = 1; return value;\n").is_empty());
+        assert_eq!(unbound_names("value = value + 1;\n"), ["value"]);
+        assert!(unbound_names("return PLAYER == int && Args == {};\n").is_empty());
+    }
+
+    #[test]
+    fn intersects_definite_bindings_across_branches() {
+        assert_eq!(
+            unbound_names("if (player)\n  value = 1;\nendif\nreturn value;\n"),
+            ["value"]
+        );
+        assert!(
+            unbound_names("if (player)\n  value = 1;\nelse\n  value = 2;\nendif\nreturn value;\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn handles_scatter_and_construct_bindings() {
+        assert_eq!(
+            unbound_names(
+                "{required, ?optional, ?defaulted = 1, @rest} = args; return {required, optional, defaulted, rest};\n"
+            ),
+            ["optional"]
+        );
+        assert!(unbound_names("for item in (args)\n  notify(player, item);\nendfor\n").is_empty());
+        assert!(
+            unbound_names("fork task (0)\n  notify(player, task);\nendfork\nreturn task;\n")
+                .is_empty()
+        );
+        assert!(
+            unbound_names("try\n  return missing;\nexcept error (ANY)\n  return error;\nendtry\n")
+                .contains(&"missing".to_owned())
+        );
+    }
+
+    #[test]
+    fn analyzes_catch_and_finally_paths() {
+        assert_eq!(
+            unbound_names("result = `(left = 1) ! ANY => (right = 2)'; return {left, right};\n"),
+            ["left", "right"]
+        );
+        assert_eq!(
+            unbound_names("try\n  return;\nfinally\n  notify(player, missing);\nendtry\n"),
+            ["missing"]
+        );
+        assert!(
+            unbound_names(
+                "try\n  value = 1;\nfinally\n  notify(player, \"done\");\nendtry\nreturn value;\n"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn returns_all_reaching_branch_definitions() {
+        let code = "if (player)\n  value = 1;\nelse\n  value = 2;\nendif\nreturn value;\n";
+        let tree = parser::parse(code).unwrap();
+        let uri = Uri::from_str("file:///test.moo").unwrap();
+        let definitions = find_definitions(tree.root_node(), code, Position::new(5, 7), &uri);
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions[0].range.start, Position::new(1, 2));
+        assert_eq!(definitions[1].range.start, Position::new(3, 2));
     }
 
     #[test]
