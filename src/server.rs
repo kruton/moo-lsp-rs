@@ -518,13 +518,17 @@ impl Server {
         let uri = &params.text_document_position_params.text_document.uri;
         let text = self.documents.get(uri)?;
         let tree = parser::parse(text)?;
-        let loc = locals::find_definition(
+        let locations = locals::find_definitions(
             tree.root_node(),
             text,
             params.text_document_position_params.position,
             uri,
-        )?;
-        Some(GotoDefinitionResponse::Scalar(loc))
+        );
+        match locations.as_slice() {
+            [] => None,
+            [location] => Some(GotoDefinitionResponse::Scalar(location.clone())),
+            _ => Some(GotoDefinitionResponse::Array(locations)),
+        }
     }
 
     fn document_highlight(
@@ -844,7 +848,7 @@ mod tests {
                 uri: uri(),
                 language_id: "lambdamoo".to_owned(),
                 version: 1,
-                text: "if (x)\nnotify(player, \"hi\");\nendif\n".to_owned(),
+                text: "if (player)\nnotify(player, \"hi\");\nendif\n".to_owned(),
             },
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
@@ -870,7 +874,7 @@ mod tests {
             content_changes: vec![TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
-                text: "if (x)\nnotify(player, \"hi\");\nendif\n".to_owned(),
+                text: "if (player)\nnotify(player, \"hi\");\nendif\n".to_owned(),
             }],
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
@@ -1028,6 +1032,65 @@ mod tests {
     }
 
     #[test]
+    fn reports_unbound_locals_and_returns_reaching_definitions() {
+        let mut server = TestServer::start();
+        server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri(),
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "if (player)\n  value = 1;\nelse\n  value = 2;\nendif\nreturn value;\n"
+                    .to_owned(),
+            },
+        });
+        assert!(server.next_diagnostics().diagnostics.is_empty());
+
+        let definitions = server.request(
+            GotoDefinition::METHOD,
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri() },
+                    position: Position::new(5, 7),
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        assert_eq!(
+            definitions
+                .response_result
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        server.notify::<DidChangeTextDocument>(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "return missing;\n".to_owned(),
+            }],
+        });
+        let diagnostics = server.next_diagnostics().diagnostics;
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code,
+            Some(NumberOrString::String("unbound-local".to_owned()))
+        );
+        assert_eq!(
+            diagnostics[0].range,
+            Range::new(Position::new(0, 7), Position::new(0, 14))
+        );
+        server.stop();
+    }
+
+    #[test]
     fn reports_protocol_errors_without_stopping() {
         let mut server = TestServer::start();
         let invalid = server.request(SemanticTokensFullRequest::METHOD, serde_json::json!({}));
@@ -1060,7 +1123,7 @@ mod tests {
                 uri: valid_uri.clone(),
                 language_id: "lambdamoo".to_owned(),
                 version: 1,
-                text: "if (x)\n  b = 1;\nendif;\n".to_owned(),
+                text: "if (player)\n  b = 1;\nendif;\n".to_owned(),
             },
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
