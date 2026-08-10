@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::{builtins, formatting, line_index::LineIndex, locals, parser, semantic_tokens};
+use crate::{
+    builtins, formatting, inlay_hints, line_index::LineIndex, locals, parser, semantic_tokens,
+};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
@@ -13,19 +15,19 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-    GotoDefinition, HoverRequest, Request as LspRequest, SemanticTokensFullRequest,
-    SignatureHelpRequest,
+    GotoDefinition, HoverRequest, InlayHintRequest, Request as LspRequest,
+    SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    LogMessageParams, MessageType, OneOf, Position, PublishDiagnosticsParams, Range,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextEdit, Uri,
+    InlayHint, InlayHintParams, LogMessageParams, MessageType, OneOf, Position,
+    PublishDiagnosticsParams, Range, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
 };
 
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -159,6 +161,7 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
@@ -288,6 +291,24 @@ impl Server {
                 output.push(Message::Response(Response::new_ok(
                     request.id,
                     self.document_highlight(&params),
+                )));
+            }
+            InlayHintRequest::METHOD => {
+                let params = match serde_json::from_value::<InlayHintParams>(request.params.clone())
+                {
+                    Ok(params) => params,
+                    Err(error) => {
+                        output.push(error_response(
+                            request.id,
+                            ErrorCode::InvalidParams,
+                            error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+                output.push(Message::Response(Response::new_ok(
+                    request.id,
+                    self.inlay_hints(&params),
                 )));
             }
             HoverRequest::METHOD => {
@@ -425,6 +446,12 @@ impl Server {
                 let result = self.document_highlight(&params);
                 send_ok(connection, request.id, result)?;
             }
+            InlayHintRequest::METHOD => {
+                let Some(params) = request_params::<InlayHintParams>(connection, &request)? else {
+                    return Ok(());
+                };
+                send_ok(connection, request.id, self.inlay_hints(&params))?;
+            }
             HoverRequest::METHOD => {
                 let Some(params) = request_params::<HoverParams>(connection, &request)? else {
                     return Ok(());
@@ -544,6 +571,12 @@ impl Server {
             text,
             params.text_document_position_params.position,
         ))
+    }
+
+    fn inlay_hints(&self, params: &InlayHintParams) -> Option<Vec<InlayHint>> {
+        let text = self.documents.get(&params.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        Some(inlay_hints::collect(tree.root_node(), text, params.range))
     }
 
     fn hover(&self, params: &HoverParams) -> Option<Hover> {
@@ -696,15 +729,15 @@ mod tests {
     };
     use lsp_types::request::{
         DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, Formatting,
-        GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest, Shutdown,
-        SignatureHelpRequest,
+        GotoDefinition, HoverRequest, InlayHintRequest, Request as _, SemanticTokensFullRequest,
+        Shutdown, SignatureHelpRequest,
     };
     use lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
         DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams,
         FoldingRangeParams, FormattingOptions, GotoDefinitionParams, InitializeParams,
-        InitializedParams, NumberOrString, Position, PublishDiagnosticsParams, Range,
-        SemanticTokensParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+        InitializedParams, InlayHintParams, NumberOrString, Position, PublishDiagnosticsParams,
+        Range, SemanticTokensParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
         TextDocumentItem, TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier,
         WorkDoneProgressParams,
     };
@@ -761,6 +794,7 @@ mod tests {
             assert_eq!(result["capabilities"]["documentFormattingProvider"], true);
             assert!(result["capabilities"]["semanticTokensProvider"].is_object());
             assert_eq!(result["capabilities"]["hoverProvider"], true);
+            assert_eq!(result["capabilities"]["inlayHintProvider"], true);
             assert_eq!(
                 result["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
                 serde_json::json!(["(", ","])
@@ -1002,6 +1036,37 @@ mod tests {
             text_document: TextDocumentIdentifier { uri: uri() },
         });
         assert!(server.next_diagnostics().diagnostics.is_empty());
+        server.stop();
+    }
+
+    #[test]
+    fn serves_builtin_argument_inlay_hints() {
+        let mut server = TestServer::start();
+        server.notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri(),
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "is_member(player, args); notify(player, \"hi\");".to_owned(),
+            },
+        });
+        assert!(server.next_diagnostics().diagnostics.is_empty());
+
+        let response = server.request(
+            InlayHintRequest::METHOD,
+            InlayHintParams {
+                text_document: TextDocumentIdentifier { uri: uri() },
+                range: Range::new(Position::new(0, 0), Position::new(1, 0)),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        );
+        let hints = response.response_result.unwrap();
+        assert_eq!(hints.as_array().unwrap().len(), 2);
+        assert_eq!(hints[0]["label"], "value:");
+        assert_eq!(hints[0]["kind"], 2);
+        assert_eq!(hints[0]["paddingRight"], true);
+        assert_eq!(hints[1]["label"], "list:");
+
         server.stop();
     }
 

@@ -226,6 +226,20 @@ pub fn find(name: &str) -> Option<&'static Builtin> {
 }
 
 impl Builtin {
+    /// Returns the curated name for an argument position, if one is known.
+    ///
+    /// An extra name on an unbounded signature describes its variadic
+    /// arguments and is repeated for every argument in that tail.
+    pub fn argument_name(&self, index: usize) -> Option<&'static str> {
+        if index < self.args.len() {
+            return self.parameter_names.get(index).copied();
+        }
+        if self.max.is_none() {
+            return self.parameter_names.get(self.args.len()).copied();
+        }
+        None
+    }
+
     pub fn signature(&self) -> String {
         let mut parts = Vec::new();
         for (i, ty) in self.args.iter().enumerate() {
@@ -577,6 +591,15 @@ mod tests {
         );
         assert!(find("new_waif").is_some());
         assert!(find("xml_parse_tree").is_some());
+        assert_eq!(
+            find("call_function").unwrap().argument_name(0),
+            Some("func-name")
+        );
+        assert_eq!(
+            find("call_function").unwrap().argument_name(3),
+            Some("value")
+        );
+        assert_eq!(find("disassemble").unwrap().argument_name(2), None);
     }
     #[test]
     fn validates_known_types_and_arity() {

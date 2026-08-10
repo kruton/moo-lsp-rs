@@ -4,6 +4,7 @@
 
 pub mod builtins;
 pub mod formatting;
+pub mod inlay_hints;
 pub mod line_index;
 pub mod locals;
 pub mod parser;
