@@ -135,7 +135,11 @@ fn classify_identifier(node: Node<'_>, text: &str) -> u32 {
     };
     match parent.kind() {
         "call_expression" => FUNCTION,
-        "verb_call" if preceded_by(node, text, ':') || preceded_by(node, text, '$') => METHOD,
+        "verb_call" | "system_verb_call"
+            if preceded_by(node, text, ':') || preceded_by(node, text, '$') =>
+        {
+            METHOD
+        }
         "prop_access" if preceded_by(node, text, '.') || preceded_by(node, text, '$') => PROPERTY,
         _ => VARIABLE,
     }
@@ -192,12 +196,13 @@ mod tests {
 
     #[test]
     fn classifies_language_constructs() {
-        let tokens = collect("if (x) notify(player.name); thing:move(); endif");
+        let tokens = collect("if (x) notify(player.name); thing:move(); $announce(); endif");
         let types: Vec<u32> = tokens.iter().map(|token| token.token_type).collect();
         assert_eq!(
             types,
             vec![
-                KEYWORD, VARIABLE, FUNCTION, VARIABLE, PROPERTY, VARIABLE, METHOD, KEYWORD
+                KEYWORD, VARIABLE, FUNCTION, VARIABLE, PROPERTY, VARIABLE, METHOD, OPERATOR,
+                METHOD, KEYWORD
             ]
         );
     }
