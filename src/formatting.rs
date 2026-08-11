@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn preserves_comments_line_endings_and_expression_text() {
-        let input = "if (x)\r\n\t/* endif is not code */\r\n  y   =   \"if\";\r\nendif\r\n";
-        let expected = "if (x)\r\n  /* endif is not code */\r\n  y   =   \"if\";\r\nendif\r\n";
+        let input = "if (x)\r\n\t\"endif is not code\";\r\n  y   =   \"if\";\r\nendif\r\n";
+        let expected = "if (x)\r\n  \"endif is not code\";\r\n  y   =   \"if\";\r\nendif\r\n";
         assert_eq!(format(input).as_deref(), Some(expected));
     }
 

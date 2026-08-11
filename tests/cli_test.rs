@@ -113,7 +113,7 @@ fn format_supports_stdout_check_write_and_directories() {
 
 #[test]
 fn invalid_usage_and_invalid_formatting_have_distinct_statuses() {
-    let conflict = run(&["format", "--check", "--write", "-"], Some("return;\n"));
+    let conflict = run(&["format", "--check", "--write", "-"], None);
     assert_eq!(conflict.status.code(), Some(2));
 
     let invalid = run(&["format", "-"], Some("if (x)\nreturn;\n"));
