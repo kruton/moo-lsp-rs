@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::{
-    builtins, formatting, inlay_hints, line_index::LineIndex, locals, parser, semantic_tokens,
-};
+use crate::{analysis, builtins, formatting, inlay_hints, locals, parser, semantic_tokens};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
@@ -606,16 +604,11 @@ fn push_diagnostics(output: &mut Vec<Message>, uri: Uri, diagnostics: Vec<lsp_ty
 
 fn validate_document_to(output: &mut Vec<Message>, uri: Uri, text: String) {
     push_log(output, format!("Validating {}", uri.as_str()));
-    let line_index = LineIndex::new(&text);
-    let mut diagnostics = Vec::new();
-    if let Some(tree) = parser::parse(&text) {
-        let root = tree.root_node();
-        parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
-        if diagnostics.is_empty() {
-            push_log(output, "Parse successful");
-        } else {
-            push_log(output, "Syntax errors detected");
-        }
+    let diagnostics = analysis::diagnostics(&text);
+    if diagnostics.is_empty() {
+        push_log(output, "Parse successful");
+    } else {
+        push_log(output, "Syntax errors detected");
     }
     push_diagnostics(output, uri, diagnostics);
 }
@@ -695,16 +688,11 @@ where
 fn validate_document(connection: &Connection, uri: Uri, text: String) -> ServerResult<()> {
     log_message(connection, format!("Validating {}", uri.as_str()))?;
 
-    let line_index = LineIndex::new(&text);
-    let mut diagnostics = Vec::new();
-    if let Some(tree) = parser::parse(&text) {
-        let root = tree.root_node();
-        parser::collect_diagnostics(root, &line_index, &text, &mut diagnostics);
-        if diagnostics.is_empty() {
-            log_message(connection, "Parse successful")?;
-        } else {
-            log_message(connection, "Syntax errors detected")?;
-        }
+    let diagnostics = analysis::diagnostics(&text);
+    if diagnostics.is_empty() {
+        log_message(connection, "Parse successful")?;
+    } else {
+        log_message(connection, "Syntax errors detected")?;
     }
 
     publish_diagnostics(connection, uri, diagnostics)

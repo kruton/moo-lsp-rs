@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
+pub mod analysis;
 pub mod builtins;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
 pub mod formatting;
 pub mod inlay_hints;
 pub mod line_index;

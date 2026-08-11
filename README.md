@@ -6,6 +6,58 @@ to assist developers in writing code. It features the ability to pinpoint errors
 at the character granularity. Features include syntax highlighting and code
 formatting.
 
+Running `moo-lsp-rs` without arguments starts the stdio-based language server;
+`moo-lsp-rs lsp` is the explicit equivalent. Other commands are possible and can
+be observed with `moo-lsp-rs --help`.
+
+## Command-line checking and formatting
+
+`moo-lsp-rs` can be used to check syntax and format files from the commmand-line.
+
+### Syntax checking
+
+```console
+$ moo-lsp-rs check example.moo
+example.moo:1:9: error[missing-semicolon]: Missing ';' at end of statement
+1 | return 1
+  | --------^
+```
+
+Pass multiple files, directories (searched recursively for files ending in `.moo`),
+or `-` to read stdin. Use `--json` for stable, versioned machine-readable output and
+`--deny-warnings` when warnings should make the check fail:
+
+```sh
+moo-lsp-rs check src/
+moo-lsp-rs check --json example.moo
+moo-lsp-rs check --deny-warnings example.moo
+```
+
+### Formatting code
+
+Formatting writes one file or stdin to stdout by default. Use `--check` to verify
+formatting without changing files, or `--write` to update files in place:
+
+```sh
+moo-lsp-rs format example.moo
+moo-lsp-rs format --check src/
+moo-lsp-rs format --write src/
+```
+
+Both commands return status 0 for success, 1 for diagnostics or formatting
+differences, and 2 for usage or I/O errors. Formatting refuses invalid source.
+
+## Agent skill
+
+The repository includes a portable `lambdamoo-coding` agent skill. It currently
+allows the agent to syntax check and format code via a skill.
+
+Install it for supported coding agents with:
+
+```sh
+npx skills add kruton/moo-lsp-rs --skill lambdamoo-coding
+```
+
 ## Editor setup
 
 Install a release binary or build the server with `cargo build --release`, then
