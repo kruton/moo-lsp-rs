@@ -2,6 +2,13 @@
 /debug
 /target
 /dist
+/npm/raw
+/npm/node_modules
+/npm/playwright-report
+/npm/test-results
+/npm/test/browser/node_modules
+/npm/test/browser/package-lock.json
+/npm/test/browser/dist
 
 # rustfmt
 **/*.rs.bk

@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare:test": "node global-setup.mjs",
+    "build:test": "../../node_modules/.bin/vite build",
+    "serve:test": "../../node_modules/.bin/vite preview --host 127.0.0.1 --port 4173"
+  }
+}

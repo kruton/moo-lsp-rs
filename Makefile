@@ -1,4 +1,4 @@
-.PHONY: wasm wasm-vscode wasm-browser wasm-targets
+.PHONY: wasm wasm-vscode wasm-browser wasm-targets npm-build npm-test npm-pack-check
 
 WASI_TARGET := wasm32-wasip1-threads
 BROWSER_TARGET := wasm32-unknown-unknown
@@ -31,3 +31,15 @@ wasm-browser:
 # One-time Rust target setup. wasm-pack and the WASI SDK are separate tools.
 wasm-targets:
 	rustup target add "$(WASI_TARGET)" "$(BROWSER_TARGET)"
+
+npm-build:
+	npm --prefix npm ci --ignore-scripts
+	npm --prefix npm run build
+
+npm-test: npm-build
+	npm --prefix npm test
+	npm --prefix npm run test:types
+	npm --prefix npm run pack:check
+
+npm-pack-check: npm-build
+	npm --prefix npm run pack:check

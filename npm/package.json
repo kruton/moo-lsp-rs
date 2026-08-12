@@ -1,0 +1,46 @@
+{
+  "name": "@kruton/moo-lsp",
+  "version": "0.2.11-beta.0",
+  "description": "LambdaMOO language server for JavaScript and WebAssembly",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kruton/moo-lsp-rs.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "browser": "./browser.js",
+      "node": "./node.js",
+      "default": "./browser.js"
+    }
+  },
+  "files": [
+    "browser.js",
+    "node.js",
+    "shared.js",
+    "index.d.ts",
+    "raw"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/node.test.mjs",
+    "test:browser": "playwright test",
+    "test:types": "tsc --noEmit -p test/fixture/tsconfig.json",
+    "pack:check": "node scripts/pack-check.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "20.19.43",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  }
+}

@@ -226,6 +226,23 @@ The output is written to `dist/web/moo-lsp-rs.wasm` for VS Code and
 `dist/browser/` for browser clients. To build only one bundle, use
 `make wasm-vscode WASI_SDK_PATH=/path/to/wasi-sdk` or `make wasm-browser`.
 
+## JavaScript package
+
+The `wasm32-unknown-unknown` server is also packaged as
+`@kruton/moo-lsp` for Node.js and browsers. It exposes lazy, asynchronous
+factories for independent LSP sessions plus direct `check()` and `format()`
+operations. Generated wasm-bindgen names are private package internals.
+
+Build and inspect the publishable package with:
+
+```sh
+make npm-build
+make npm-pack-check
+```
+
+The disposable artifact is assembled in `dist/npm`. See `npm/README.md` for
+the public JavaScript API.
+
 ## Related projects
 
 - [vscode-lambdamoo](https://github.com/kruton/vscode-lambdamoo) - Plugin using this LSP in VS Code (and clones)

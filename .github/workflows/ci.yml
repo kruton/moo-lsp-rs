@@ -50,6 +50,46 @@ jobs:
       - name: Build WebAssembly language server
         run: wasm-pack build --release --target web --out-dir dist/browser
 
+  npm:
+    name: Test npm package
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: npm/package-lock.json
+
+      - name: Install Rust target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        # renovate: datasource=crate depName=wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix npm ci --ignore-scripts
+
+      - name: Install Chromium
+        run: npm --prefix npm exec -- playwright install --with-deps chromium
+
+      - name: Build and inspect packed artifact
+        run: |
+          npm --prefix npm run build
+          npm --prefix npm run pack:check
+
+      - name: Test Node.js and declarations
+        run: |
+          npm --prefix npm test
+          npm --prefix npm run test:types
+
+      - name: Test browser bundle
+        run: npm --prefix npm run test:browser
+
   wasm:
     name: Build VS Code WebAssembly language server
     runs-on: ubuntu-26.04
