@@ -31,6 +31,7 @@
     "access": "public"
   },
   "scripts": {
+    "check-versions": "../scripts/check-versions.sh",
     "build": "node scripts/build.mjs",
     "test": "node --test test/node.test.mjs",
     "test:browser": "playwright test",

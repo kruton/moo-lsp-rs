@@ -28,13 +28,7 @@ jobs:
         shell: bash
         run: |
           cargo tree --locked >/dev/null
-          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq --raw-output '.packages[] | select(.name == "moo-lsp-rs") | .version')"
-          npm_version="$(jq --raw-output '.version' npm/package.json)"
-          expected_tag="v${cargo_version}"
-          if [[ "${npm_version}" != "${cargo_version}" || "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
-            echo "Cargo ${cargo_version}, npm ${npm_version}, and tag ${GITHUB_REF_NAME} must agree (expected ${expected_tag})" >&2
-            exit 1
-          fi
+          ./scripts/check-versions.sh
 
       - name: Install Rust target and wasm-pack
         run: |
