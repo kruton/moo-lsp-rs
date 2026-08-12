@@ -32,15 +32,23 @@ pub fn format(text: &str) -> Option<String> {
         return None;
     }
 
-    let line_count = text.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let mut line_events = vec![Vec::new(); line_count];
-    collect_indent_events(tree.root_node(), text.as_bytes(), &mut line_events);
     let mut empty_statement_ranges = Vec::new();
     collect_empty_statements(tree.root_node(), &mut empty_statement_ranges);
     let mut normalized = text.to_owned();
     for range in empty_statement_ranges.into_iter().rev() {
         normalized.replace_range(range, "");
     }
+
+    let tree = parser::parse(&normalized)?;
+    let mut statement_boundaries = Vec::new();
+    collect_statement_boundaries(tree.root_node(), &mut statement_boundaries);
+    insert_line_breaks(&mut normalized, statement_boundaries);
+
+    // Inserted statement lines change the rows used by the indentation query.
+    let tree = parser::parse(&normalized)?;
+    let line_count = normalized.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let mut line_events = vec![Vec::new(); line_count];
+    collect_indent_events(tree.root_node(), normalized.as_bytes(), &mut line_events);
 
     let mut depth = 0usize;
     let mut formatted = String::with_capacity(text.len());
@@ -77,6 +85,40 @@ pub fn format(text: &str) -> Option<String> {
     }
 
     Some(formatted)
+}
+
+fn collect_statement_boundaries(node: Node<'_>, boundaries: &mut Vec<usize>) {
+    if matches!(
+        node.kind(),
+        "statement" | "elseif_clause" | "else_clause" | "except_clause"
+    ) || matches!(
+        node.kind(),
+        "endif" | "endfor" | "endwhile" | "endfork" | "finally" | "endtry"
+    ) {
+        boundaries.push(node.start_byte());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_statement_boundaries(child, boundaries);
+    }
+}
+
+fn insert_line_breaks(text: &mut String, mut boundaries: Vec<usize>) {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for boundary in boundaries.into_iter().rev() {
+        let bytes = text.as_bytes();
+        let mut whitespace_start = boundary;
+        while whitespace_start > 0 && matches!(bytes[whitespace_start - 1], b' ' | b'\t') {
+            whitespace_start -= 1;
+        }
+        if whitespace_start > 0 && bytes[whitespace_start - 1] != b'\n' {
+            text.replace_range(whitespace_start..boundary, newline);
+        }
+    }
 }
 
 fn collect_empty_statements(node: Node<'_>, ranges: &mut Vec<std::ops::Range<usize>>) {
@@ -139,6 +181,41 @@ mod tests {
     #[test]
     fn collapses_repeated_statement_semicolons() {
         assert_eq!(format("0;;;;;;\n").as_deref(), Some("0;\n"));
+    }
+
+    #[test]
+    fn puts_statements_and_block_delimiters_on_separate_lines() {
+        let input = "ready = 1; if (ready) notify(player, \"Ready\"); endif\n";
+        let expected = "ready = 1;\nif (ready)\n  notify(player, \"Ready\");\nendif\n";
+        assert_eq!(format(input).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn puts_simple_statements_on_separate_lines() {
+        let input = "first = 1; second = 2; notify(player, \"Done\");\n";
+        let expected = "first = 1;\nsecond = 2;\nnotify(player, \"Done\");\n";
+        assert_eq!(format(input).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn splits_inline_try_except_blocks() {
+        let input = "try risky(); except err (E_PERM) handle(err); except (ANY) return; endtry\n";
+        let expected = "try\n  risky();\nexcept err (E_PERM)\n  handle(err);\nexcept (ANY)\n  return;\nendtry\n";
+        assert_eq!(format(input).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn splits_inline_try_finally_blocks() {
+        let input = "try risky(); finally cleanup(); endtry\n";
+        let expected = "try\n  risky();\nfinally\n  cleanup();\nendtry\n";
+        assert_eq!(format(input).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn splits_inline_conditional_branches() {
+        let input = "if (first) one(); elseif (second) two(); else three(); endif\n";
+        let expected = "if (first)\n  one();\nelseif (second)\n  two();\nelse\n  three();\nendif\n";
+        assert_eq!(format(input).as_deref(), Some(expected));
     }
 
     #[test]
