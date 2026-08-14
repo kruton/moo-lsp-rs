@@ -1,6 +1,6 @@
 {
   "name": "@kruton/moo-lsp",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "LambdaMOO language server for JavaScript and WebAssembly",
   "type": "module",
   "license": "MIT",
