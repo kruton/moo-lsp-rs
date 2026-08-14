@@ -11,6 +11,7 @@ pub mod inlay_hints;
 pub mod line_index;
 pub mod locals;
 pub mod parser;
+pub mod remote_navigation;
 pub mod semantic_tokens;
 pub mod server;
 

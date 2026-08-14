@@ -72,6 +72,34 @@ impl LineIndex {
         (line, col)
     }
 
+    /// Convert an LSP UTF-16 position to a byte offset, clamping to the line.
+    pub fn offset(&self, text: &str, position: Position) -> usize {
+        let line = (position.line as usize).min(self.line_starts.len().saturating_sub(1));
+        let start = self.line_starts[line];
+        let end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.len_bytes);
+        let content = safe_slice(text, start..end)
+            .strip_suffix('\n')
+            .unwrap_or(safe_slice(text, start..end));
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        let target = position.character as usize;
+        let mut utf16 = 0;
+        for (byte, character) in content.char_indices() {
+            if utf16 >= target {
+                return start + byte;
+            }
+            let next = utf16 + character.len_utf16();
+            if next > target {
+                return start + byte;
+            }
+            utf16 = next;
+        }
+        start + content.len()
+    }
+
     pub fn clamp_point(&self, text: &str, row: usize, col_bytes: usize) -> Position {
         if self.line_starts.is_empty() {
             return Position::new(0, 0);

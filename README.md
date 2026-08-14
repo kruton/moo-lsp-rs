@@ -122,6 +122,31 @@ key mappings.
 `moo-lsp-rs` does not currently advertise semantic completion, so vim-lsp will
 not offer LSP completion candidates for LambdaMOO code.
 
+## Remote MOO document locations
+
+When a client advertises the standard
+`InitializeParams.capabilities.window.showDocument.support` capability,
+“Go to Definition” may return transport-independent remote verb locations.
+The canonical form is:
+
+```text
+moo://<authority>/object/<number>/verb/<name>
+```
+
+The authority and current object are taken from the open `moo:` document; the
+language server never receives WebDAV endpoints or credentials. Statically
+known object-valued property traversal uses typed path segments, for example
+`$local.webdav:foo()` links to:
+
+```text
+moo://<authority>/object/0/property/local/object/property/webdav/object/verb/foo
+```
+
+Each `/object` directory exposes the referenced object's WebDAV tree. Property
+and verb names preserve their source case and are UTF-8 percent-encoded as
+individual path segments. Clients that provide the `moo:` filesystem scheme
+are responsible for resolving and opening these resources.
+
 ### Emacs with Eglot
 
 Emacs 29 and later include Eglot. Add this configuration to your init file; the

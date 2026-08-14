@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::{analysis, builtins, formatting, inlay_hints, locals, parser, semantic_tokens};
+use crate::{
+    analysis, builtins, formatting, inlay_hints, locals, parser, remote_navigation, semantic_tokens,
+};
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, LogMessage, Notification,
@@ -32,10 +34,13 @@ type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 pub fn run(connection: Connection) -> ServerResult<()> {
     let capabilities = serde_json::to_value(server_capabilities())?;
-    connection.initialize(capabilities)?;
+    let initialize_params = connection.initialize(capabilities)?;
     log_message(&connection, "server initialized!")?;
 
-    let mut server = Server::default();
+    let mut server = Server {
+        remote_links: supports_show_document(&initialize_params),
+        ..Server::default()
+    };
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -86,6 +91,7 @@ impl Session {
                         "Server is already initialized".to_owned(),
                     ));
                 } else {
+                    self.server.remote_links = supports_show_document(&request.params);
                     self.initialized = true;
                     output.push(Message::Response(Response::new_ok(
                         request.id,
@@ -173,6 +179,7 @@ fn server_capabilities() -> ServerCapabilities {
 #[derive(Default)]
 struct Server {
     documents: HashMap<Uri, String>,
+    remote_links: bool,
 }
 
 impl Server {
@@ -549,6 +556,17 @@ impl Server {
             params.text_document_position_params.position,
             uri,
         );
+        if locations.is_empty()
+            && self.remote_links
+            && let Some(location) = remote_navigation::find_definition(
+                tree.root_node(),
+                text,
+                params.text_document_position_params.position,
+                uri,
+            )
+        {
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
         match locations.as_slice() {
             [] => None,
             [location] => Some(GotoDefinitionResponse::Scalar(location.clone())),
@@ -590,6 +608,13 @@ impl Server {
         let tree = parser::parse(text)?;
         builtins::signature_help(tree.root_node(), text, position.position)
     }
+}
+
+fn supports_show_document(params: &serde_json::Value) -> bool {
+    params
+        .pointer("/capabilities/window/showDocument/support")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn push_diagnostics(output: &mut Vec<Message>, uri: Uri, diagnostics: Vec<lsp_types::Diagnostic>) {
@@ -743,6 +768,7 @@ mod tests {
         }))
         .unwrap();
         let output = session.handle(initialize);
+        assert!(!session.server.remote_links);
         assert_eq!(output.len(), 1);
         let response = serde_json::to_value(&output[0]).unwrap();
         assert_eq!(response["id"], 1);
@@ -760,6 +786,24 @@ mod tests {
         assert_eq!(response["error"]["code"], -32601);
     }
 
+    #[test]
+    fn headerless_session_records_show_document_support() {
+        let mut session = Session::new();
+        let initialize: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "window": { "showDocument": { "support": true } }
+                }
+            }
+        }))
+        .unwrap();
+        session.handle(initialize);
+        assert!(session.server.remote_links);
+    }
+
     struct TestServer {
         client: lsp_server::Connection,
         thread: thread::JoinHandle<()>,
@@ -768,6 +812,10 @@ mod tests {
 
     impl TestServer {
         fn start() -> Self {
+            Self::start_with_show_document(false)
+        }
+
+        fn start_with_show_document(support: bool) -> Self {
             let (server, client) = lsp_server::Connection::memory();
             let thread = thread::spawn(move || run(server).unwrap());
             let mut test_server = Self {
@@ -776,7 +824,10 @@ mod tests {
                 next_id: 1,
             };
 
-            let initialize = test_server.request("initialize", InitializeParams::default());
+            let mut initialize_params = serde_json::to_value(InitializeParams::default()).unwrap();
+            initialize_params["capabilities"]["window"]["showDocument"]["support"] =
+                serde_json::json!(support);
+            let initialize = test_server.request("initialize", initialize_params);
             let result = initialize.response_result.unwrap();
             assert_eq!(result["capabilities"]["textDocumentSync"], 1);
             assert_eq!(result["capabilities"]["documentFormattingProvider"], true);
@@ -1141,6 +1192,53 @@ mod tests {
             Range::new(Position::new(0, 7), Position::new(0, 14))
         );
         server.stop();
+    }
+
+    #[test]
+    fn gates_remote_verb_definitions_on_show_document_support() {
+        fn request_remote_definition(server: &mut TestServer, uri: &Uri) -> serde_json::Value {
+            server
+                .request(
+                    GotoDefinition::METHOD,
+                    GotoDefinitionParams {
+                        text_document_position_params: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position: Position::new(0, 5),
+                        },
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                        partial_result_params: Default::default(),
+                    },
+                )
+                .response_result
+                .unwrap()
+        }
+
+        let remote_uri: Uri = "moo://codepoint/object/42/verb/current".parse().unwrap();
+        let document = |uri: Uri| DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: "lambdamoo".to_owned(),
+                version: 1,
+                text: "#123:foo();".to_owned(),
+            },
+        };
+
+        let mut unsupported = TestServer::start();
+        unsupported.notify::<DidOpenTextDocument>(document(remote_uri.clone()));
+        assert!(unsupported.next_diagnostics().diagnostics.is_empty());
+        assert!(request_remote_definition(&mut unsupported, &remote_uri).is_null());
+        unsupported.stop();
+
+        let mut supported = TestServer::start_with_show_document(true);
+        supported.notify::<DidOpenTextDocument>(document(remote_uri.clone()));
+        assert!(supported.next_diagnostics().diagnostics.is_empty());
+        let location = request_remote_definition(&mut supported, &remote_uri);
+        assert_eq!(location["uri"], "moo://codepoint/object/123/verb/foo");
+        assert_eq!(
+            location["range"]["start"],
+            serde_json::json!(Position::new(0, 0))
+        );
+        supported.stop();
     }
 
     #[test]
