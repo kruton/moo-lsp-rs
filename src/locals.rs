@@ -330,6 +330,41 @@ impl Analyzer<'_> {
         state
     }
 
+    fn analyze_condition(&mut self, node: Node, state: State) -> (State, State) {
+        let children = named_children(node);
+        if node.kind() == "expression" && children.len() == 1 {
+            return self.analyze_condition(children[0], state);
+        }
+        if node.kind() != "catch_expression" {
+            let state = self.analyze_expression(node, state);
+            return (state.clone(), state);
+        }
+
+        let Some(protected) = children.first() else {
+            return (state.clone(), state);
+        };
+        let success = self.analyze_expression(*protected, state.clone());
+        let mut failure = state;
+        if let Some(codes) = children.iter().find(|child| child.kind() == "codes") {
+            failure = self.analyze_expression(*codes, failure);
+        }
+        let Some(fallback) = children
+            .iter()
+            .rev()
+            .find(|child| child.kind() == "expression" && **child != *protected)
+        else {
+            return (success.clone(), success);
+        };
+        failure = self.analyze_expression(*fallback, failure);
+
+        if is_statically_false(*fallback, self.text) {
+            (success.clone(), join_states(&[success, failure]))
+        } else {
+            let joined = join_states(&[success, failure]);
+            (joined.clone(), joined)
+        }
+    }
+
     fn analyze_scatter(&mut self, node: Node, mut state: State) -> State {
         let Some(list) = node.named_child(0) else {
             return state;
@@ -374,20 +409,19 @@ impl Analyzer<'_> {
         state
     }
 
-    fn analyze_if(&mut self, node: Node, mut state: State) -> Option<State> {
+    fn analyze_if(&mut self, node: Node, state: State) -> Option<State> {
         let children = named_children(node);
         let Some(condition) = children.iter().find(|child| child.kind() == "expression") else {
             return Some(state);
         };
-        state = self.analyze_expression(*condition, state);
+        let (true_state, mut false_state) = self.analyze_condition(*condition, state);
         let mut branches = Vec::new();
         let direct = children
             .iter()
             .copied()
             .filter(|child| child.kind() == "statement");
-        branches.push(self.analyze_statement_list(direct, state.clone()));
+        branches.push(self.analyze_statement_list(direct, true_state));
         let mut has_else = false;
-        let mut false_state = state.clone();
         for clause in children {
             match clause.kind() {
                 "elseif_clause" => {
@@ -396,7 +430,18 @@ impl Analyzer<'_> {
                         .iter()
                         .find(|child| child.kind() == "expression")
                     {
-                        false_state = self.analyze_expression(*condition, false_state);
+                        let (clause_true, clause_false) =
+                            self.analyze_condition(*condition, false_state);
+                        false_state = clause_false;
+                        branches.push(
+                            self.analyze_statement_list(
+                                clause_children
+                                    .into_iter()
+                                    .filter(|child| child.kind() == "statement"),
+                                clause_true,
+                            ),
+                        );
+                        continue;
                     }
                     branches.push(
                         self.analyze_statement_list(
@@ -595,6 +640,28 @@ impl Analyzer<'_> {
 fn named_children(node: Node) -> Vec<Node> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).collect()
+}
+
+fn is_statically_false(mut node: Node, text: &str) -> bool {
+    loop {
+        let children = named_children(node);
+        if node.kind() == "expression" && children.len() == 1 {
+            node = children[0];
+        } else {
+            let literal = safe_slice(text, node.byte_range()).trim();
+            if literal.parse::<f64>().is_ok_and(|number| number == 0.0) {
+                return true;
+            }
+            return match node.kind() {
+                "string" => literal == "\"\"",
+                "list_literal" => literal == "{}",
+                "object" | "error" => true,
+                // Reserved for grammars supporting the map extension.
+                "map_literal" => literal == "[]",
+                _ => false,
+            };
+        }
+    }
 }
 
 fn join_reachable(states: Vec<Option<State>>) -> Option<State> {
@@ -1111,6 +1178,32 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn catch_with_false_fallback_refines_the_true_branch() {
+        let code = "host = args[1];\ntime_now = time();\nif (`{expiration, data} = this.name_cache[host] ! E_RANGE => 0')\n  if (time_now > expiration)\n    this.name_cache = $dict:remove(this.name_cache, host);\n  else\n    return data;\n  endif\nendif\n";
+        let names = unbound_names(code);
+        assert!(names.is_empty(), "unexpected unbound locals: {names:?}");
+
+        for fallback in ["0", "0.0", "-0.0", "\"\"", "{}", "#17", "E_NONE", "E_RANGE"] {
+            let code =
+                format!("if (`value = 1 ! E_RANGE => {fallback}')\n  return value;\nendif\n");
+            assert!(
+                unbound_names(&code).is_empty(),
+                "fallback {fallback} should be statically false"
+            );
+        }
+
+        for fallback in ["1", "0.1", "\"x\"", "{0}"] {
+            let code =
+                format!("if (`value = 1 ! E_RANGE => {fallback}')\n  return value;\nendif\n");
+            assert_eq!(
+                unbound_names(&code),
+                ["value"],
+                "fallback {fallback} may enter the true branch"
+            );
+        }
     }
 
     #[test]
