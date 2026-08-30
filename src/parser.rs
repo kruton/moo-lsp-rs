@@ -54,7 +54,7 @@ pub fn collect_document_symbols(node: Node, text: &str) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_node = cap.node;
             let start_pos = cap_node.start_position();
             let end_pos = cap_node.end_position();
@@ -107,7 +107,7 @@ pub fn collect_folding_ranges(node: Node, text: &str) -> Vec<FoldingRange> {
     let mut ranges = Vec::new();
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let start_pos = cap.node.start_position();
             let end_pos = cap.node.end_position();
 
@@ -188,7 +188,7 @@ pub fn collect_diagnostics(
     let mut matches = cursor.matches(query, node, text.as_bytes());
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_name = match query.capture_names().get(cap.index as usize) {
                 Some(name) => *name,
                 None => continue,
