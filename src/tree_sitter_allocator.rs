@@ -21,10 +21,16 @@ static INSTALL: Once = Once::new();
 
 pub(crate) fn install() {
     INSTALL.call_once(|| {
+        let allocator = tree_sitter::Allocator {
+            malloc,
+            calloc,
+            realloc: reallocate,
+            free,
+        };
         // SAFETY: This runs before this crate creates any Tree-sitter object,
         // and the callbacks remain installed for the lifetime of the module.
         unsafe {
-            tree_sitter::set_allocator(Some(malloc), Some(calloc), Some(reallocate), Some(free));
+            tree_sitter::set_allocator(Some(allocator));
         }
     });
 }

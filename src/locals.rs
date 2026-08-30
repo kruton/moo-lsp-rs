@@ -705,7 +705,7 @@ pub fn collect_locals(root: Node, text: &str) -> Vec<SymbolLocation> {
     let mut symbols = Vec::new();
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_name = match query.capture_names().get(cap.index as usize) {
                 Some(name) => *name,
                 None => continue,

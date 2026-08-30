@@ -139,7 +139,7 @@ fn collect_indent_events(node: Node<'_>, source: &[u8], lines: &mut [Vec<IndentE
     let mut matches = cursor.matches(query, node, source);
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_name = match query.capture_names().get(cap.index as usize) {
                 Some(name) => *name,
                 None => continue,
