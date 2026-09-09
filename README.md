@@ -230,7 +230,9 @@ sha256sum --check SHA256SUMS
 The workflow can also be run manually to test every build without publishing a
 GitHub release.
 
-## Development WebAssembly builds
+## Development
+
+### WebAssembly builds
 
 Install the Rust targets and `wasm-pack` once:
 
@@ -251,7 +253,7 @@ The output is written to `dist/web/moo-lsp-rs.wasm` for VS Code and
 `dist/browser/` for browser clients. To build only one bundle, use
 `make wasm-vscode WASI_SDK_PATH=/path/to/wasi-sdk` or `make wasm-browser`.
 
-## JavaScript package
+### JavaScript package
 
 The `wasm32-unknown-unknown` server is also packaged as
 `@kruton/moo-lsp` for Node.js and browsers. It exposes lazy, asynchronous
