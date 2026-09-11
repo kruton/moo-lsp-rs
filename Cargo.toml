@@ -1,6 +1,6 @@
 [package]
 name = "moo-lsp-rs"
-version = "0.2.14"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
