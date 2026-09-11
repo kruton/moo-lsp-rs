@@ -179,7 +179,30 @@ moo://<authority>/object/0/property/local/object/property/webdav/object/verb/foo
 Each `/object` directory exposes the referenced object's WebDAV tree. Property
 and verb names preserve their source case and are UTF-8 percent-encoded as
 individual path segments. Clients that provide the `moo:` filesystem scheme
-are responsible for resolving and opening these resources.
+are responsible for opening these resources.
+
+Remote-aware clients opt into protocol version 1 with:
+
+```json
+{
+  "initializationOptions": {
+    "lambdamoo": { "remoteDocuments": 1 }
+  }
+}
+```
+
+The server then sends `lambdamoo/readDocument` requests with a `uri`; the client
+returns `{ "text": "..." }` using its open buffer or configured transport. The
+server uses that narrow hook to resolve inherited verbs, canonicalize
+`/owned/<id>/` and `/resolve/` paths to `/object/<id>/`, and build method hover
+documentation from leading string comments and a leading `{...} = args;`
+assignment. When an open URI has a canonical spelling, the server sends
+`lambdamoo/canonicalizeDocument` with `uri` and `canonicalUri`. Clients should
+defer replacing a dirty document until it is saved or reverted.
+
+Both methods only operate on `moo:` URIs. Endpoints and credentials remain in
+the client. Protocol support is advertised as
+`capabilities.experimental.lambdamoo.remoteDocuments = 1`.
 
 ## Release binaries
 
