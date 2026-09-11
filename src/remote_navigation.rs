@@ -97,7 +97,7 @@ impl Resolver<'_, '_> {
                     properties: Vec::new(),
                 }))
             }
-            "string" => Some(Constant::String(parse_string(safe_slice(
+            "string" => Some(Constant::String(parse_string_literal(safe_slice(
                 self.text,
                 node.byte_range(),
             ))?)),
@@ -223,7 +223,7 @@ fn source_context(uri: &Uri) -> Option<(&str, u64)> {
         return None;
     }
     let mut segments = path.split('/');
-    if segments.next()? != "object" {
+    if !matches!(segments.next()?, "object" | "owned") {
         return None;
     }
     let number = segments.next()?.parse().ok()?;
@@ -255,7 +255,7 @@ fn encode_segment(value: &str) -> String {
     encoded
 }
 
-fn parse_string(raw: &str) -> Option<String> {
+pub(crate) fn parse_string_literal(raw: &str) -> Option<String> {
     let body = raw.strip_prefix('"')?.strip_suffix('"')?;
     let mut result = String::new();
     let mut chars = body.chars();

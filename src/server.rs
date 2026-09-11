@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::error::Error;
 
 use crate::{
-    analysis, builtins, formatting, inlay_hints, locals, parser, remote_navigation, semantic_tokens,
+    analysis, builtins, formatting, inlay_hints, locals, parser, remote_documents,
+    remote_navigation, semantic_tokens,
 };
 use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
 use lsp_types::notification::{
@@ -33,32 +34,14 @@ use lsp_types::{
 type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 pub fn run(connection: Connection) -> ServerResult<()> {
-    let capabilities = serde_json::to_value(server_capabilities())?;
-    let initialize_params = connection.initialize(capabilities)?;
-    log_message(&connection, "server initialized!")?;
-
-    let mut server = Server {
-        remote_links: supports_show_document(&initialize_params),
-        ..Server::default()
-    };
+    let mut session = Session::new();
     for message in &connection.receiver {
-        match message {
-            Message::Request(request) => {
-                if connection.handle_shutdown(&request)? {
-                    break;
-                }
-                server.handle_request(&connection, request)?;
-            }
-            Message::Notification(notification) => {
-                let method = notification.method.clone();
-                if let Err(error) = server.handle_notification(&connection, notification) {
-                    log_message(
-                        &connection,
-                        format!("Invalid {method} notification: {error}"),
-                    )?;
-                }
-            }
-            Message::Response(_) => {}
+        let exit = matches!(&message, Message::Notification(notification) if notification.method == "exit");
+        for output in session.handle(message) {
+            connection.sender.send(output)?;
+        }
+        if exit {
+            break;
         }
     }
     Ok(())
@@ -73,6 +56,33 @@ pub struct Session {
     server: Server,
     initialized: bool,
     shutdown_requested: bool,
+    remote_documents: bool,
+    next_request_id: i32,
+    pending: HashMap<RequestId, PendingRemoteRead>,
+}
+
+const READ_DOCUMENT_METHOD: &str = "lambdamoo/readDocument";
+const CANONICALIZE_DOCUMENT_METHOD: &str = "lambdamoo/canonicalizeDocument";
+
+#[derive(Debug)]
+enum PendingRemoteRead {
+    Definition {
+        response_id: RequestId,
+        target: remote_documents::VerbTarget,
+    },
+    HoverResolution {
+        response_id: RequestId,
+        target: remote_documents::VerbTarget,
+    },
+    HoverDocument {
+        response_id: RequestId,
+        uri: Uri,
+        resolved: bool,
+    },
+    OpenDocument {
+        original_uri: Uri,
+        target: remote_documents::VerbTarget,
+    },
 }
 
 impl Session {
@@ -92,6 +102,7 @@ impl Session {
                     ));
                 } else {
                     self.server.remote_links = supports_show_document(&request.params);
+                    self.remote_documents = supports_remote_documents(&request.params);
                     self.initialized = true;
                     output.push(Message::Response(Response::new_ok(
                         request.id,
@@ -110,6 +121,12 @@ impl Session {
                     "Server is not running".to_owned(),
                 ));
             }
+            Message::Request(request) if request.method == GotoDefinition::METHOD => {
+                self.start_definition(&mut output, request);
+            }
+            Message::Request(request) if request.method == HoverRequest::METHOD => {
+                self.start_hover(&mut output, request);
+            }
             Message::Request(request) => self.server.handle_request_to(&mut output, request),
             Message::Notification(notification) if notification.method == "initialized" => {
                 push_log(&mut output, "server initialized!");
@@ -117,6 +134,17 @@ impl Session {
             Message::Notification(notification) if notification.method == "exit" => {}
             Message::Notification(notification) if self.initialized && !self.shutdown_requested => {
                 let method = notification.method.clone();
+                if method == "$/cancelRequest" {
+                    self.cancel_request(&mut output, &notification.params);
+                    return output;
+                }
+                let opened_uri = if notification.method == DidOpenTextDocument::METHOD {
+                    serde_json::from_value::<DidOpenTextDocumentParams>(notification.params.clone())
+                        .ok()
+                        .map(|params| params.text_document.uri)
+                } else {
+                    None
+                };
                 if let Err(error) = self
                     .server
                     .handle_notification_to(&mut output, notification)
@@ -126,10 +154,253 @@ impl Session {
                         format!("Invalid {method} notification: {error}"),
                     );
                 }
+                if let Some(uri) = opened_uri {
+                    self.start_open_canonicalization(&mut output, uri);
+                }
             }
-            Message::Notification(_) | Message::Response(_) => {}
+            Message::Response(response) => self.finish_remote_read(&mut output, response),
+            Message::Notification(_) => {}
         }
         output
+    }
+
+    fn start_definition(&mut self, output: &mut Vec<Message>, request: Request) {
+        let params = match serde_json::from_value::<GotoDefinitionParams>(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                output.push(error_response(
+                    request.id,
+                    ErrorCode::InvalidParams,
+                    error.to_string(),
+                ));
+                return;
+            }
+        };
+        let result = self.server.definition(&params);
+        let Some(GotoDefinitionResponse::Scalar(mut location)) = result else {
+            output.push(Message::Response(Response::new_ok(request.id, result)));
+            return;
+        };
+        location.uri = remote_documents::canonical_owned_uri(&location.uri);
+        let Some(target) = remote_documents::verb_target(&location.uri) else {
+            output.push(Message::Response(Response::new_ok(
+                request.id,
+                GotoDefinitionResponse::Scalar(location),
+            )));
+            return;
+        };
+        if !self.remote_documents {
+            output.push(Message::Response(Response::new_ok(
+                request.id,
+                GotoDefinitionResponse::Scalar(location),
+            )));
+            return;
+        }
+        self.read_document(
+            output,
+            target.resolution_uri.clone(),
+            PendingRemoteRead::Definition {
+                response_id: request.id,
+                target,
+            },
+        );
+    }
+
+    fn start_hover(&mut self, output: &mut Vec<Message>, request: Request) {
+        let params = match serde_json::from_value::<HoverParams>(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                output.push(error_response(
+                    request.id,
+                    ErrorCode::InvalidParams,
+                    error.to_string(),
+                ));
+                return;
+            }
+        };
+        if let Some(hover) = self.server.hover(&params) {
+            output.push(Message::Response(Response::new_ok(request.id, hover)));
+            return;
+        }
+        if !self.remote_documents {
+            output.push(Message::Response(Response::new_ok(
+                request.id,
+                Option::<Hover>::None,
+            )));
+            return;
+        }
+        let Some(GotoDefinitionResponse::Scalar(location)) =
+            self.server.definition(&GotoDefinitionParams {
+                text_document_position_params: params.text_document_position_params,
+                work_done_progress_params: params.work_done_progress_params,
+                partial_result_params: Default::default(),
+            })
+        else {
+            output.push(Message::Response(Response::new_ok(
+                request.id,
+                Option::<Hover>::None,
+            )));
+            return;
+        };
+        let uri = remote_documents::canonical_owned_uri(&location.uri);
+        let Some(target) = remote_documents::verb_target(&uri) else {
+            output.push(Message::Response(Response::new_ok(
+                request.id,
+                Option::<Hover>::None,
+            )));
+            return;
+        };
+        self.read_document(
+            output,
+            target.resolution_uri.clone(),
+            PendingRemoteRead::HoverResolution {
+                response_id: request.id,
+                target,
+            },
+        );
+    }
+
+    fn start_open_canonicalization(&mut self, output: &mut Vec<Message>, original_uri: Uri) {
+        if !self.remote_documents || !original_uri.as_str().starts_with("moo://") {
+            return;
+        }
+        let owned = remote_documents::canonical_owned_uri(&original_uri);
+        let Some(target) = remote_documents::verb_target(&owned) else {
+            self.notify_canonical_uri(output, original_uri, owned);
+            return;
+        };
+        self.read_document(
+            output,
+            target.resolution_uri.clone(),
+            PendingRemoteRead::OpenDocument {
+                original_uri,
+                target,
+            },
+        );
+    }
+
+    fn read_document(&mut self, output: &mut Vec<Message>, uri: Uri, pending: PendingRemoteRead) {
+        let id = RequestId::from(format!("lambdamoo-{}", self.next_request_id));
+        self.next_request_id += 1;
+        self.pending.insert(id.clone(), pending);
+        output.push(Message::Request(Request::new(
+            id,
+            READ_DOCUMENT_METHOD.to_owned(),
+            serde_json::json!({ "uri": uri }),
+        )));
+    }
+
+    fn finish_remote_read(&mut self, output: &mut Vec<Message>, response: Response) {
+        let Some(pending) = self.pending.remove(&response.id) else {
+            return;
+        };
+        let text = response
+            .response_result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.get("text"))
+            .and_then(serde_json::Value::as_str);
+        match pending {
+            PendingRemoteRead::Definition {
+                response_id,
+                target,
+            } => {
+                let uri = text
+                    .and_then(|text| remote_documents::resolve_verb_uri(&target, text))
+                    .unwrap_or(target.uri);
+                output.push(Message::Response(Response::new_ok(
+                    response_id,
+                    GotoDefinitionResponse::Scalar(lsp_types::Location {
+                        uri,
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    }),
+                )));
+            }
+            PendingRemoteRead::HoverResolution {
+                response_id,
+                target,
+            } => {
+                let resolved_uri =
+                    text.and_then(|text| remote_documents::resolve_verb_uri(&target, text));
+                let resolved = resolved_uri.is_some();
+                let uri = resolved_uri.unwrap_or(target.uri);
+                self.read_document(
+                    output,
+                    uri.clone(),
+                    PendingRemoteRead::HoverDocument {
+                        response_id,
+                        uri,
+                        resolved,
+                    },
+                );
+            }
+            PendingRemoteRead::HoverDocument {
+                response_id,
+                uri,
+                resolved,
+            } => {
+                output.push(Message::Response(Response::new_ok(
+                    response_id,
+                    remote_documents::hover(&uri, text, resolved),
+                )));
+            }
+            PendingRemoteRead::OpenDocument {
+                original_uri,
+                target,
+            } => {
+                let uri = text
+                    .and_then(|text| remote_documents::resolve_verb_uri(&target, text))
+                    .unwrap_or(target.uri);
+                self.notify_canonical_uri(output, original_uri, uri);
+            }
+        }
+    }
+
+    fn notify_canonical_uri(&self, output: &mut Vec<Message>, uri: Uri, canonical_uri: Uri) {
+        if uri == canonical_uri {
+            return;
+        }
+        output.push(Message::Notification(lsp_server::Notification::new(
+            CANONICALIZE_DOCUMENT_METHOD.to_owned(),
+            serde_json::json!({ "uri": uri, "canonicalUri": canonical_uri }),
+        )));
+    }
+
+    fn cancel_request(&mut self, output: &mut Vec<Message>, params: &serde_json::Value) {
+        let Some(cancelled_id) = params.get("id") else {
+            return;
+        };
+        let remote_ids: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(remote_id, pending)| {
+                let response_id = match pending {
+                    PendingRemoteRead::Definition { response_id, .. }
+                    | PendingRemoteRead::HoverResolution { response_id, .. }
+                    | PendingRemoteRead::HoverDocument { response_id, .. } => Some(response_id),
+                    PendingRemoteRead::OpenDocument { .. } => None,
+                }?;
+                (serde_json::to_value(response_id).ok().as_ref() == Some(cancelled_id))
+                    .then(|| remote_id.clone())
+            })
+            .collect();
+        if remote_ids.is_empty() {
+            return;
+        }
+        for remote_id in remote_ids {
+            self.pending.remove(&remote_id);
+            output.push(Message::Notification(lsp_server::Notification::new(
+                "$/cancelRequest".to_owned(),
+                serde_json::json!({ "id": remote_id }),
+            )));
+        }
+        if let Ok(response_id) = serde_json::from_value::<RequestId>(cancelled_id.clone()) {
+            output.push(Message::Response(Response::new_err(
+                response_id,
+                -32800,
+                "Request cancelled".to_owned(),
+            )));
+        }
     }
 }
 
@@ -172,6 +443,9 @@ fn server_capabilities() -> ServerCapabilities {
             retrigger_characters: Some(vec![",".to_owned()]),
             ..Default::default()
         }),
+        experimental: Some(serde_json::json!({
+            "lambdamoo": { "remoteDocuments": 1 }
+        })),
         ..Default::default()
     }
 }
@@ -395,129 +669,6 @@ impl Server {
         Ok(())
     }
 
-    fn handle_request(&self, connection: &Connection, request: Request) -> ServerResult<()> {
-        match request.method.as_str() {
-            SemanticTokensFullRequest::METHOD => {
-                let Some(params) = request_params::<SemanticTokensParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.documents.get(&params.text_document.uri).map(|text| {
-                    SemanticTokensResult::Tokens(SemanticTokens {
-                        result_id: None,
-                        data: semantic_tokens::collect(text),
-                    })
-                });
-                send_ok(connection, request.id, result)?;
-            }
-            Formatting::METHOD => {
-                let Some(params) =
-                    request_params::<DocumentFormattingParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.formatting(&params);
-                send_ok(connection, request.id, result)?;
-            }
-            FoldingRangeRequest::METHOD => {
-                let Some(params) = request_params::<FoldingRangeParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.folding_range(&params);
-                send_ok(connection, request.id, result)?;
-            }
-            DocumentSymbolRequest::METHOD => {
-                let Some(params) = request_params::<DocumentSymbolParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.document_symbols(&params);
-                send_ok(connection, request.id, result)?;
-            }
-            GotoDefinition::METHOD => {
-                let Some(params) = request_params::<GotoDefinitionParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.definition(&params);
-                send_ok(connection, request.id, result)?;
-            }
-            DocumentHighlightRequest::METHOD => {
-                let Some(params) = request_params::<DocumentHighlightParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                let result = self.document_highlight(&params);
-                send_ok(connection, request.id, result)?;
-            }
-            InlayHintRequest::METHOD => {
-                let Some(params) = request_params::<InlayHintParams>(connection, &request)? else {
-                    return Ok(());
-                };
-                send_ok(connection, request.id, self.inlay_hints(&params))?;
-            }
-            HoverRequest::METHOD => {
-                let Some(params) = request_params::<HoverParams>(connection, &request)? else {
-                    return Ok(());
-                };
-                send_ok(connection, request.id, self.hover(&params))?;
-            }
-            SignatureHelpRequest::METHOD => {
-                let Some(params) = request_params::<SignatureHelpParams>(connection, &request)?
-                else {
-                    return Ok(());
-                };
-                send_ok(connection, request.id, self.signature_help(&params))?;
-            }
-            _ => {
-                send_error(
-                    connection,
-                    request.id,
-                    ErrorCode::MethodNotFound,
-                    format!("Unsupported method: {}", request.method),
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_notification(
-        &mut self,
-        connection: &Connection,
-        notification: lsp_server::Notification,
-    ) -> ServerResult<()> {
-        match notification.method.as_str() {
-            DidOpenTextDocument::METHOD => {
-                let params: DidOpenTextDocumentParams =
-                    serde_json::from_value(notification.params)?;
-                log_message(connection, "file opened!")?;
-                let uri = params.text_document.uri;
-                let text = params.text_document.text;
-                self.documents.insert(uri.clone(), text.clone());
-                validate_document(connection, uri, text)?;
-            }
-            DidChangeTextDocument::METHOD => {
-                let params: DidChangeTextDocumentParams =
-                    serde_json::from_value(notification.params)?;
-                log_message(connection, "file changed!")?;
-                if let Some(content) = params.content_changes.into_iter().next() {
-                    let uri = params.text_document.uri;
-                    self.documents.insert(uri.clone(), content.text.clone());
-                    validate_document(connection, uri, content.text)?;
-                }
-            }
-            DidCloseTextDocument::METHOD => {
-                let params: DidCloseTextDocumentParams =
-                    serde_json::from_value(notification.params)?;
-                self.documents.remove(&params.text_document.uri);
-                publish_diagnostics(connection, params.text_document.uri, Vec::new())?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn formatting(&self, params: &DocumentFormattingParams) -> Option<Vec<TextEdit>> {
         let text = self.documents.get(&params.text_document.uri)?;
         let new_text = formatting::format(text)?;
@@ -617,6 +768,13 @@ fn supports_show_document(params: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn supports_remote_documents(params: &serde_json::Value) -> bool {
+    params
+        .pointer("/initializationOptions/lambdamoo/remoteDocuments")
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+}
+
 fn push_diagnostics(output: &mut Vec<Message>, uri: Uri, diagnostics: Vec<lsp_types::Diagnostic>) {
     output.push(
         lsp_server::Notification::new(
@@ -636,91 +794,6 @@ fn validate_document_to(output: &mut Vec<Message>, uri: Uri, text: String) {
         push_log(output, "Syntax errors detected");
     }
     push_diagnostics(output, uri, diagnostics);
-}
-
-fn request_params<T>(connection: &Connection, request: &Request) -> ServerResult<Option<T>>
-where
-    T: serde::de::DeserializeOwned,
-{
-    match serde_json::from_value(request.params.clone()) {
-        Ok(params) => Ok(Some(params)),
-        Err(error) => {
-            send_error(
-                connection,
-                request.id.clone(),
-                ErrorCode::InvalidParams,
-                error.to_string(),
-            )?;
-            Ok(None)
-        }
-    }
-}
-
-fn send_ok(
-    connection: &Connection,
-    id: RequestId,
-    result: impl serde::Serialize,
-) -> ServerResult<()> {
-    connection
-        .sender
-        .send(Response::new_ok(id, result).into())?;
-    Ok(())
-}
-
-fn send_error(
-    connection: &Connection,
-    id: RequestId,
-    code: ErrorCode,
-    message: String,
-) -> ServerResult<()> {
-    connection
-        .sender
-        .send(Response::new_err(id, code as i32, message).into())?;
-    Ok(())
-}
-
-fn log_message(connection: &Connection, message: impl Into<String>) -> ServerResult<()> {
-    send_notification::<LogMessage>(
-        connection,
-        LogMessageParams {
-            typ: MessageType::INFO,
-            message: message.into(),
-        },
-    )
-}
-
-fn publish_diagnostics(
-    connection: &Connection,
-    uri: Uri,
-    diagnostics: Vec<lsp_types::Diagnostic>,
-) -> ServerResult<()> {
-    send_notification::<PublishDiagnostics>(
-        connection,
-        PublishDiagnosticsParams::new(uri, diagnostics, None),
-    )
-}
-
-fn send_notification<N>(connection: &Connection, params: N::Params) -> ServerResult<()>
-where
-    N: Notification,
-{
-    connection
-        .sender
-        .send(lsp_server::Notification::new(N::METHOD.to_owned(), params).into())?;
-    Ok(())
-}
-
-fn validate_document(connection: &Connection, uri: Uri, text: String) -> ServerResult<()> {
-    log_message(connection, format!("Validating {}", uri.as_str()))?;
-
-    let diagnostics = analysis::diagnostics(&text);
-    if diagnostics.is_empty() {
-        log_message(connection, "Parse successful")?;
-    } else {
-        log_message(connection, "Syntax errors detected")?;
-    }
-
-    publish_diagnostics(connection, uri, diagnostics)
 }
 
 fn document_end(text: &str) -> Position {
@@ -755,7 +828,8 @@ mod tests {
         WorkDoneProgressParams,
     };
 
-    use super::{Session, run};
+    use super::{CANONICALIZE_DOCUMENT_METHOD, READ_DOCUMENT_METHOD, Session, run};
+    use lsp_server::Response;
 
     #[test]
     fn headerless_session_initializes_and_replies() {
@@ -802,6 +876,147 @@ mod tests {
         .unwrap();
         session.handle(initialize);
         assert!(session.server.remote_links);
+    }
+
+    fn remote_session() -> Session {
+        let mut session = Session::new();
+        let initialize: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "window": { "showDocument": { "support": true } }
+                },
+                "initializationOptions": {
+                    "lambdamoo": { "remoteDocuments": 1 }
+                }
+            }
+        }))
+        .unwrap();
+        let response = serde_json::to_value(&session.handle(initialize)[0]).unwrap();
+        assert_eq!(
+            response["result"]["capabilities"]["experimental"]["lambdamoo"]["remoteDocuments"],
+            1
+        );
+        session
+    }
+
+    fn read_response(request: &Message, text: &str) -> Message {
+        let Message::Request(request) = request else {
+            panic!("expected a remote document request");
+        };
+        assert_eq!(request.method, READ_DOCUMENT_METHOD);
+        Message::Response(Response::new_ok(
+            request.id.clone(),
+            serde_json::json!({ "text": text }),
+        ))
+    }
+
+    #[test]
+    fn resolves_remote_definitions_and_builds_method_hover() {
+        let mut session = remote_session();
+        let remote_uri: Uri = "moo://waterpoint/object/42/verb/current".parse().unwrap();
+        let opened = Message::Notification(lsp_server::Notification::new(
+            DidOpenTextDocument::METHOD.to_owned(),
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: remote_uri.clone(),
+                    language_id: "lambdamoo".to_owned(),
+                    version: 1,
+                    text: "$string_utils:explode();".to_owned(),
+                },
+            },
+        ));
+        let output = session.handle(opened);
+        let open_read = output
+            .iter()
+            .find(|message| matches!(message, Message::Request(_)))
+            .unwrap();
+        assert!(session.handle(read_response(open_read, "#42")).is_empty());
+
+        let definition: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": remote_uri },
+                "position": { "line": 0, "character": 15 }
+            }
+        }))
+        .unwrap();
+        let output = session.handle(definition);
+        let resolution = &output[0];
+        assert_eq!(
+            serde_json::to_value(resolution).unwrap()["params"]["uri"],
+            "moo://waterpoint/object/0/property/string_utils/object/resolve/verb/explode/defined-on"
+        );
+        let output = session.handle(read_response(resolution, "#18\n"));
+        let definition = serde_json::to_value(&output[0]).unwrap();
+        assert_eq!(
+            definition["result"]["uri"],
+            "moo://waterpoint/object/18/verb/explode"
+        );
+
+        let hover: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": remote_uri },
+                "position": { "line": 0, "character": 15 }
+            }
+        }))
+        .unwrap();
+        let resolution = session.handle(hover).remove(0);
+        let document_request = session.handle(read_response(&resolution, "#18")).remove(0);
+        assert_eq!(
+            serde_json::to_value(&document_request).unwrap()["params"]["uri"],
+            "moo://waterpoint/object/18/verb/explode"
+        );
+        let output = session.handle(read_response(
+            &document_request,
+            "\"Split a string.\";\n{subject, delim} = args;\nreturn {};",
+        ));
+        let hover = serde_json::to_value(&output[0]).unwrap();
+        let value = hover["result"]["contents"]["value"].as_str().unwrap();
+        assert!(value.contains("{subject, delim} = args;"));
+        assert!(value.contains("Split a string."));
+        assert!(value.contains("moo://waterpoint/object/18/verb/explode"));
+    }
+
+    #[test]
+    fn canonicalizes_an_open_owned_verb() {
+        let mut session = remote_session();
+        let opened: Message = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "moo://waterpoint/owned/525/verb/check_authorization",
+                    "languageId": "lambdamoo",
+                    "version": 1,
+                    "text": "return 1;"
+                }
+            }
+        }))
+        .unwrap();
+        let output = session.handle(opened);
+        let request = output
+            .iter()
+            .find(|message| matches!(message, Message::Request(_)))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["params"]["uri"],
+            "moo://waterpoint/object/525/resolve/verb/check_authorization/defined-on"
+        );
+        let output = session.handle(read_response(request, "#525"));
+        let notification = serde_json::to_value(&output[0]).unwrap();
+        assert_eq!(notification["method"], CANONICALIZE_DOCUMENT_METHOD);
+        assert_eq!(
+            notification["params"]["canonicalUri"],
+            "moo://waterpoint/object/525/verb/check_authorization"
+        );
     }
 
     struct TestServer {
