@@ -40,6 +40,26 @@ pub fn find_definition(
     position: Position,
     source_uri: &Uri,
 ) -> Option<Location> {
+    find_call_definition(root, text, position, source_uri, true)
+}
+
+/// Resolve the innermost verb call containing a hover position.
+pub fn find_hover_definition(
+    root: Node,
+    text: &str,
+    position: Position,
+    source_uri: &Uri,
+) -> Option<Location> {
+    find_call_definition(root, text, position, source_uri, false)
+}
+
+fn find_call_definition(
+    root: Node,
+    text: &str,
+    position: Position,
+    source_uri: &Uri,
+    require_verb_position: bool,
+) -> Option<Location> {
     let (authority, this_object) = source_context(source_uri)?;
     let offset = LineIndex::new(text).offset(text, position);
     let mut node = root.descendant_for_byte_range(offset, offset)?;
@@ -50,7 +70,10 @@ pub fn find_definition(
     let call = ancestors(node)
         .find(|candidate| matches!(candidate.kind(), "verb_call" | "system_verb_call"))?;
     let verb = call.child_by_field_name("verb")?;
-    if !position_is_in(verb, offset) && !(offset > 0 && position_is_in(verb, offset - 1)) {
+    if require_verb_position
+        && !position_is_in(verb, offset)
+        && !(offset > 0 && position_is_in(verb, offset - 1))
+    {
         return None;
     }
 
@@ -335,6 +358,23 @@ mod tests {
         let uri = "file:///test.moo".parse().unwrap();
         assert!(
             find_definition(tree.root_node(), "#1:foo();", Position::new(0, 4), &uri).is_none()
+        );
+    }
+
+    #[test]
+    fn hover_resolves_the_innermost_enclosing_verb_call() {
+        let text = "tostr(this:verbA(foo, bar), this:verbB())";
+        let tree = parser::parse(text).unwrap();
+        let uri = "moo://codepoint/object/42/verb/current".parse().unwrap();
+
+        let location =
+            find_hover_definition(tree.root_node(), text, Position::new(0, 20), &uri).unwrap();
+        assert_eq!(
+            location.uri.as_str(),
+            "moo://codepoint/object/42/verb/verbA"
+        );
+        assert!(
+            find_hover_definition(tree.root_node(), text, Position::new(0, 27), &uri,).is_none()
         );
     }
 }
