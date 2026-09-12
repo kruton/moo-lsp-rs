@@ -229,13 +229,7 @@ impl Session {
             )));
             return;
         }
-        let Some(GotoDefinitionResponse::Scalar(location)) =
-            self.server.definition(&GotoDefinitionParams {
-                text_document_position_params: params.text_document_position_params,
-                work_done_progress_params: params.work_done_progress_params,
-                partial_result_params: Default::default(),
-            })
-        else {
+        let Some(location) = self.server.hover_definition(&params) else {
             output.push(Message::Response(Response::new_ok(
                 request.id,
                 Option::<Hover>::None,
@@ -751,6 +745,20 @@ impl Server {
         let text = self.documents.get(&position.text_document.uri)?;
         let tree = parser::parse(text)?;
         builtins::hover(tree.root_node(), text, position.position)
+    }
+
+    fn hover_definition(&self, params: &HoverParams) -> Option<lsp_types::Location> {
+        let position = &params.text_document_position_params;
+        let text = self.documents.get(&position.text_document.uri)?;
+        let tree = parser::parse(text)?;
+        self.remote_links.then(|| {
+            remote_navigation::find_hover_definition(
+                tree.root_node(),
+                text,
+                position.position,
+                &position.text_document.uri,
+            )
+        })?
     }
 
     fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {

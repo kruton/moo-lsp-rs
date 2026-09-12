@@ -516,9 +516,20 @@ fn call_at(root: Node, offset: usize) -> Option<Node> {
     }
 }
 
+fn hover_call_at(root: Node, offset: usize) -> Option<Node> {
+    let mut node = root.descendant_for_byte_range(offset, offset)?;
+    loop {
+        match node.kind() {
+            "call_expression" => return Some(node),
+            "verb_call" | "system_verb_call" => return None,
+            _ => node = node.parent()?,
+        }
+    }
+}
+
 pub fn hover(root: Node, text: &str, position: Position) -> Option<Hover> {
     let offset = byte_offset(text, position)?;
-    let call = call_at(root, offset)?;
+    let call = hover_call_at(root, offset)?;
     let function = call.child_by_field_name("function")?;
     let builtin = find(safe_slice(text, function.byte_range()))?;
     let index = LineIndex::new(text);
@@ -659,6 +670,26 @@ mod tests {
         let help = signature_help(tree.root_node(), text, Position::new(0, 16)).unwrap();
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.signatures[0].parameters.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn hover_selects_the_most_specific_builtin_call() {
+        let text = "tostr(this:verbA(), this:verbB())";
+        let tree = parser::parse(text).unwrap();
+        let root = tree.root_node();
+
+        assert!(hover(root, text, Position::new(0, 2)).is_some());
+        assert!(hover(root, text, Position::new(0, 11)).is_none());
+        assert!(hover(root, text, Position::new(0, 25)).is_none());
+        assert!(hover(root, text, Position::new(0, 18)).is_some());
+
+        let text = "tostr(abs(-1))";
+        let tree = parser::parse(text).unwrap();
+        let hover = hover(tree.root_node(), text, Position::new(0, 11)).unwrap();
+        let HoverContents::Markup(contents) = hover.contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(contents.value.contains("abs("));
     }
 
     #[test]
